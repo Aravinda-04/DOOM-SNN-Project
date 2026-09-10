@@ -1,0 +1,7 @@
+vizdoom
+torch
+torchvision
+snntorch
+numpy
+opencv-python
+matplotlib
