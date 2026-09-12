@@ -18,12 +18,12 @@ BATCH_SIZE = 64
 GAMMA = 0.99
 EPS_START = 1.0
 EPS_END = 0.1
-EPS_DECAY = 30000
+EPS_DECAY = 3000 # Much faster decay so the agent actually exploits
 LR = 1e-4
 MEMORY_SIZE = 10000
 TAU = 0.005 # Soft update rate
 NUM_EPISODES = 200
-SPARSITY_WEIGHT = 1e-4
+SPARSITY_WEIGHT = 1e-6 # Lowered so it doesn't overpower the RL loss
 REWARD_SCALE = 100.0
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -72,7 +72,10 @@ def optimize_model(memory, policy_net, target_net, optimizer, criterion):
 
     # Compute loss (MSE Loss) + Sparsity Loss
     mse_loss = criterion(state_action_values, expected_state_action_values)
-    sparsity_loss = spk_count * SPARSITY_WEIGHT
+    
+    # spk_count is the total sum of spikes across the batch and time steps.
+    # We divide by BATCH_SIZE so the penalty doesn't scale with batch size.
+    sparsity_loss = (spk_count / BATCH_SIZE) * SPARSITY_WEIGHT
     loss = mse_loss + sparsity_loss
 
     # Optimize the model
