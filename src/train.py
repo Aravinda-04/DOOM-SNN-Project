@@ -11,7 +11,9 @@ from torch.utils.tensorboard import SummaryWriter
 
 # Import our custom modules
 from env import DoomEnvironment
-from network import SpikingQNetwork
+from networks.snn import SpikingQNetwork
+from networks.ffnn import FeedForwardQNetwork
+from networks.rsnn import RSNNQNetwork
 
 # Hyperparameters
 BATCH_SIZE = 64
@@ -25,6 +27,7 @@ TAU = 0.005 # Soft update rate
 NUM_EPISODES = 200
 SPARSITY_WEIGHT = 1e-6 # Lowered so it doesn't overpower the RL loss
 REWARD_SCALE = 100.0
+MODEL_TYPE = "SNN" # Options: "SNN", "FFNN", "RSNN"
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
@@ -105,10 +108,15 @@ def main():
     env = DoomEnvironment(render=False) # Disable render for faster training
     action_size = len(env.actions)
     
-    policy_net = SpikingQNetwork(action_size=action_size).to(device)
-    
-    # Initialize target network with same weights
-    target_net = SpikingQNetwork(action_size=action_size).to(device)
+    if MODEL_TYPE == "SNN":
+        policy_net = SpikingQNetwork(action_size=action_size).to(device)
+        target_net = SpikingQNetwork(action_size=action_size).to(device)
+    elif MODEL_TYPE == "FFNN":
+        policy_net = FeedForwardQNetwork(action_size=action_size).to(device)
+        target_net = FeedForwardQNetwork(action_size=action_size).to(device)
+    elif MODEL_TYPE == "RSNN":
+        policy_net = RSNNQNetwork(action_size=action_size).to(device)
+        target_net = RSNNQNetwork(action_size=action_size).to(device)
     target_net.load_state_dict(policy_net.state_dict())
     target_net.eval()
     
@@ -174,8 +182,9 @@ def main():
         # Checkpointing
         if total_reward > best_reward:
             best_reward = total_reward
-            torch.save(policy_net.state_dict(), "models/best_snn.pth")
-            print(f"--> New best reward: {best_reward:.1f}. Model saved.")
+            save_path = f"models/best_{MODEL_TYPE.lower()}.pth"
+            torch.save(policy_net.state_dict(), save_path)
+            print(f"--> New best reward: {best_reward:.1f}. Model saved to {save_path}")
             
         # Log episode metrics
         writer.add_scalar('Reward', total_reward, i_episode)

@@ -5,7 +5,9 @@ import numpy as np
 
 # Import our custom modules
 from env import DoomEnvironment
-from network import SpikingQNetwork
+from networks.snn import SpikingQNetwork
+from networks.ffnn import FeedForwardQNetwork
+from networks.rsnn import RSNNQNetwork
 
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -16,10 +18,17 @@ def main():
     env = DoomEnvironment(render=True)
     action_size = len(env.actions)
     
-    # Load the trained model
-    policy_net = SpikingQNetwork(action_size=action_size).to(device)
+    MODEL_TYPE = "SNN" # Options: "SNN", "FFNN", "RSNN"
     
-    model_path = "models/best_snn.pth"
+    # Load the trained model
+    if MODEL_TYPE == "SNN":
+        policy_net = SpikingQNetwork(action_size=action_size).to(device)
+    elif MODEL_TYPE == "FFNN":
+        policy_net = FeedForwardQNetwork(action_size=action_size).to(device)
+    elif MODEL_TYPE == "RSNN":
+        policy_net = RSNNQNetwork(action_size=action_size).to(device)
+        
+    model_path = f"models/best_{MODEL_TYPE.lower()}.pth"
     if not os.path.exists(model_path):
         print(f"Error: Could not find model at '{model_path}'.")
         print("Please ensure you have successfully completed a training run first.")

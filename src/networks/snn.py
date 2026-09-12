@@ -82,26 +82,3 @@ class SpikingQNetwork(nn.Module):
             
         # Return the accumulated membrane potential (Q-values) and total spike count
         return q_values, total_spikes
-
-
-if __name__ == "__main__":
-    # Small test block to verify the network
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
-    
-    # Instantiate the network
-    net = SpikingQNetwork().to(device)
-    
-    # Create a dummy batch of 2 frames (Batch, Channels, Height, Width)
-    dummy_input = torch.rand(2, 1, 84, 84).to(device)
-    
-    print(f"Input shape: {dummy_input.shape}")
-    
-    # Forward pass
-    q_out, spk_count = net(dummy_input)
-    
-    print(f"Output shape: {q_out.shape}")
-    print(f"Output values (Q-values):\n{q_out.detach().cpu().numpy()}")
-    print(f"Total Spikes generated in pass: {spk_count.item()}")
-    
-    print("\nNetwork structure is working successfully!")
