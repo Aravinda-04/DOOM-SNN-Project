@@ -1,3 +1,4 @@
+import os
 import math
 import random
 import time
@@ -6,6 +7,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import numpy as np
+from torch.utils.tensorboard import SummaryWriter
 
 # Import our custom modules
 from env import DoomEnvironment
@@ -16,11 +18,13 @@ BATCH_SIZE = 32
 GAMMA = 0.99
 EPS_START = 1.0
 EPS_END = 0.1
-EPS_DECAY = 1000
+EPS_DECAY = 30000
 LR = 1e-4
 MEMORY_SIZE = 10000
 TARGET_UPDATE = 10
-NUM_EPISODES = 5 # Set to 5 for initial testing
+NUM_EPISODES = 200 # Increased for real training
+SPARSITY_WEIGHT = 1e-4
+REWARD_SCALE = 100.0
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
@@ -38,9 +42,9 @@ class ReplayMemory:
     def __len__(self):
         return len(self.memory)
 
-def optimize_model(memory, policy_net, optimizer, criterion):
+def optimize_model(memory, policy_net, target_net, optimizer, criterion):
     if len(memory) < BATCH_SIZE:
-        return
+        return None
     
     transitions = memory.sample(BATCH_SIZE)
     # Transpose the batch
@@ -54,18 +58,22 @@ def optimize_model(memory, policy_net, optimizer, criterion):
     next_state_batch = torch.stack([torch.tensor(s, dtype=torch.float32).unsqueeze(0) for s in batch_next_state]).to(device)
     done_batch = torch.tensor(batch_done, dtype=torch.float32).to(device)
 
-    # Compute Q(s_t, a) - the model computes Q(s_t), then we select the columns of actions taken
-    state_action_values = policy_net(state_batch).gather(1, action_batch).squeeze(1)
+    # Compute Q(s_t, a) and spk_count
+    q_values, spk_count = policy_net(state_batch)
+    state_action_values = q_values.gather(1, action_batch).squeeze(1)
 
-    # Compute V(s_{t+1}) for all next states.
+    # Compute V(s_{t+1}) for all next states using the target network.
     with torch.no_grad():
-        next_state_values = policy_net(next_state_batch).max(1)[0]
+        next_q_values, _ = target_net(next_state_batch)
+        next_state_values = next_q_values.max(1)[0]
     
     # Compute the expected Q values
     expected_state_action_values = reward_batch + (GAMMA * next_state_values * (1 - done_batch))
 
-    # Compute loss (MSE Loss)
-    loss = criterion(state_action_values, expected_state_action_values)
+    # Compute loss (MSE Loss) + Sparsity Loss
+    mse_loss = criterion(state_action_values, expected_state_action_values)
+    sparsity_loss = spk_count * SPARSITY_WEIGHT
+    loss = mse_loss + sparsity_loss
 
     # Optimize the model
     optimizer.zero_grad()
@@ -75,16 +83,34 @@ def optimize_model(memory, policy_net, optimizer, criterion):
     torch.nn.utils.clip_grad_norm_(policy_net.parameters(), max_norm=1.0)
     
     optimizer.step()
+    return loss.item()
+
+def apply_weight_constraints(model):
+    """
+    Applies quantization constraints by clipping weights to a low-bit precision range.
+    Here we clamp between -1.0 and 1.0 to simulate an 8-bit constraint scaling.
+    """
+    with torch.no_grad():
+        for param in model.parameters():
+            param.clamp_(-1.0, 1.0)
 
 def main():
     print(f"Starting Spiking DQN training on {device}...")
+    writer = SummaryWriter('runs/doom_snn')
     
     # Initialize environment and networks
     env = DoomEnvironment(render=False) # Disable render for faster training
     action_size = len(env.actions)
     
     policy_net = SpikingQNetwork(action_size=action_size).to(device)
-    # Usually DQN has a target network, but for simplicity in this PoC we use just one or we can add it later.
+    
+    # Initialize target network with same weights
+    target_net = SpikingQNetwork(action_size=action_size).to(device)
+    target_net.load_state_dict(policy_net.state_dict())
+    target_net.eval()
+    
+    os.makedirs("models", exist_ok=True)
+    best_reward = -float('inf')
     
     optimizer = optim.Adam(policy_net.parameters(), lr=LR)
     criterion = nn.MSELoss()
@@ -109,7 +135,7 @@ def main():
                 with torch.no_grad():
                     # Format state for network: (Batch=1, Channels=1, H, W)
                     state_t = torch.tensor(state, dtype=torch.float32).unsqueeze(0).unsqueeze(0).to(device)
-                    q_values = policy_net(state_t)
+                    q_values, _ = policy_net(state_t)
                     action = q_values.max(1)[1].item()
             else:
                 action = random.randrange(action_size)
@@ -118,20 +144,42 @@ def main():
             next_state, reward, done = env.step(action)
             total_reward += reward
 
-            # Store the transition in memory
-            memory.push(state, action, reward, next_state, done)
+            # Store the scaled transition in memory for stable Q-learning
+            scaled_reward = reward / REWARD_SCALE
+            memory.push(state, action, scaled_reward, next_state, done)
 
             # Move to the next state
             state = next_state
 
             # Perform one step of the optimization
-            optimize_model(memory, policy_net, optimizer, criterion)
+            loss = optimize_model(memory, policy_net, target_net, optimizer, criterion)
+            apply_weight_constraints(policy_net)
+            
+            if loss is not None:
+                writer.add_scalar('Loss', loss, steps_done)
             
         episode_time = time.time() - start_time
         print(f"Episode {i_episode + 1}/{NUM_EPISODES} | Reward: {total_reward:.1f} | Epsilon: {eps_threshold:.2f} | Time: {episode_time:.1f}s")
+        
+        # Checkpointing
+        if total_reward > best_reward:
+            best_reward = total_reward
+            torch.save(policy_net.state_dict(), "models/best_snn.pth")
+            print(f"--> New best reward: {best_reward:.1f}. Model saved.")
+            
+        # Update target network
+        if i_episode % TARGET_UPDATE == 0:
+            target_net.load_state_dict(policy_net.state_dict())
+            print("--> Target network updated.")
+            
+        # Log episode metrics
+        writer.add_scalar('Reward', total_reward, i_episode)
+        writer.add_scalar('Epsilon', eps_threshold, i_episode)
+        writer.flush()
 
     env.close()
-    print("Training test completed successfully!")
+    writer.close()
+    print("Training completed successfully!")
 
 if __name__ == "__main__":
     main()

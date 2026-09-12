@@ -8,7 +8,7 @@ This project sets up a reinforcement learning environment using **ViZDoom** and 
 ## Current Progress & Project Structure
 - `src/env.py`: ViZDoom environment setup, observation extraction, and frame preprocessing (grayscale, 84x84).
 - `src/network.py`: Spiking Convolutional Neural Network (SCNN) using `snnTorch` with Leaky Integrate-and-Fire (LIF) neurons and rate-coded visual input.
-- `src/train.py`: Training loop for the Spiking Deep Q-Network (SDQN) using Surrogate Gradient Descent and BPTT.
+- `src/train.py`: Training loop for the Spiking Deep Q-Network (SDQN) with Hardware Constraints (Sparsity Penalty & Weight Quantization) and TensorBoard logging.
 - `requirements.txt`: Python dependencies.
 - `proposal.md`: Initial project proposal, architecture details, and FPGA deployment strategy.
 
@@ -36,4 +36,10 @@ python src/network.py
 Start training the Spiking DQN agent:
 ```bash
 python src/train.py
+```
+
+**4. Monitor Training with TensorBoard**
+To view the training progress (Loss, Reward, Epsilon):
+```bash
+tensorboard --logdir runs
 ```

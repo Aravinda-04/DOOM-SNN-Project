@@ -5,3 +5,4 @@ snntorch
 numpy
 opencv-python
 matplotlib
+tensorboard

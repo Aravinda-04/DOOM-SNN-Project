@@ -4,3 +4,5 @@ __pycache__/
 _vizdoom.ini
 *.cfg
 *.wad
+runs/
+models/

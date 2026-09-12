@@ -50,6 +50,7 @@ class SpikingQNetwork(nn.Module):
         # We will accumulate the membrane potential of the output layer over time
         # to represent the Q-values.
         q_values = torch.zeros(x.size(0), self.action_size, device=x.device)
+        total_spikes = torch.tensor(0.0, device=x.device)
         
         for step in range(self.num_steps):
             # Pass the spikes for the current time step through the network
@@ -76,8 +77,11 @@ class SpikingQNetwork(nn.Module):
             # Accumulate the final layer's membrane potential
             q_values += mem5
             
-        # Return the accumulated membrane potential (Q-values)
-        return q_values
+            # Tally spikes for sparsity constraint
+            total_spikes += spk1.sum() + spk2.sum() + spk3.sum() + spk4.sum()
+            
+        # Return the accumulated membrane potential (Q-values) and total spike count
+        return q_values, total_spikes
 
 
 if __name__ == "__main__":
@@ -94,9 +98,10 @@ if __name__ == "__main__":
     print(f"Input shape: {dummy_input.shape}")
     
     # Forward pass
-    q_out = net(dummy_input)
+    q_out, spk_count = net(dummy_input)
     
     print(f"Output shape: {q_out.shape}")
     print(f"Output values (Q-values):\n{q_out.detach().cpu().numpy()}")
+    print(f"Total Spikes generated in pass: {spk_count.item()}")
     
     print("\nNetwork structure is working successfully!")
