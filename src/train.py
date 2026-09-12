@@ -14,15 +14,15 @@ from env import DoomEnvironment
 from network import SpikingQNetwork
 
 # Hyperparameters
-BATCH_SIZE = 32
+BATCH_SIZE = 64
 GAMMA = 0.99
 EPS_START = 1.0
 EPS_END = 0.1
 EPS_DECAY = 30000
 LR = 1e-4
 MEMORY_SIZE = 10000
-TARGET_UPDATE = 10
-NUM_EPISODES = 200 # Increased for real training
+TAU = 0.005 # Soft update rate
+NUM_EPISODES = 200
 SPARSITY_WEIGHT = 1e-4
 REWARD_SCALE = 100.0
 
@@ -87,12 +87,12 @@ def optimize_model(memory, policy_net, target_net, optimizer, criterion):
 
 def apply_weight_constraints(model):
     """
-    Applies quantization constraints by clipping weights to a low-bit precision range.
-    Here we clamp between -1.0 and 1.0 to simulate an 8-bit constraint scaling.
+    Applies quantization constraints by clipping weights.
+    Relaxed to [-5.0, 5.0] to prevent gradient destruction during early training.
     """
     with torch.no_grad():
         for param in model.parameters():
-            param.clamp_(-1.0, 1.0)
+            param.clamp_(-5.0, 5.0)
 
 def main():
     print(f"Starting Spiking DQN training on {device}...")
@@ -113,7 +113,7 @@ def main():
     best_reward = -float('inf')
     
     optimizer = optim.Adam(policy_net.parameters(), lr=LR)
-    criterion = nn.MSELoss()
+    criterion = nn.SmoothL1Loss() # Huber Loss is more stable for DQN than MSE
     memory = ReplayMemory(MEMORY_SIZE)
 
     steps_done = 0
@@ -155,6 +155,13 @@ def main():
             loss = optimize_model(memory, policy_net, target_net, optimizer, criterion)
             apply_weight_constraints(policy_net)
             
+            # Soft update of target network
+            target_net_state_dict = target_net.state_dict()
+            policy_net_state_dict = policy_net.state_dict()
+            for key in policy_net_state_dict:
+                target_net_state_dict[key] = policy_net_state_dict[key]*TAU + target_net_state_dict[key]*(1-TAU)
+            target_net.load_state_dict(target_net_state_dict)
+            
             if loss is not None:
                 writer.add_scalar('Loss', loss, steps_done)
             
@@ -166,11 +173,6 @@ def main():
             best_reward = total_reward
             torch.save(policy_net.state_dict(), "models/best_snn.pth")
             print(f"--> New best reward: {best_reward:.1f}. Model saved.")
-            
-        # Update target network
-        if i_episode % TARGET_UPDATE == 0:
-            target_net.load_state_dict(policy_net.state_dict())
-            print("--> Target network updated.")
             
         # Log episode metrics
         writer.add_scalar('Reward', total_reward, i_episode)
