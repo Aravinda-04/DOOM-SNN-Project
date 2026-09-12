@@ -1,45 +1,49 @@
-# DOOM-SNN-Project
+# DOOM Spiking Neural Network (SNN) Accelerator
 
-Autonomous DOOM gameplay simulation using Spiking Neural Networks (SNNs) in Python, designed for future deployment on the PeraMorphIQ neuromorphic FPGA accelerator.
+This repository contains a Python-based reinforcement learning pipeline designed to train neural networks to play DOOM autonomously. It is built as a **comparative study** between standard Artificial Neural Networks and biological Spiking Neural Networks (SNNs) prior to hardware deployment on an FPGA neuromorphic accelerator.
 
-## Overview
-This project sets up a reinforcement learning environment using **ViZDoom** and builds a Spiking Convolutional Neural Network (SCNN) using **snnTorch**. The network learns to play DOOM and is constrained (via quantization and sparsity) to ensure compatibility with FPGA hardware.
+## 🧠 Supported Architectures
+The project features a modular architecture to allow easy collaboration. The models are located in `src/networks/`:
+1. **Feed-Forward Neural Network (FFNN)**: A standard, non-spiking Convolutional Neural Network baseline (`ffnn.py`).
+2. **Spiking Neural Network (SNN)**: A biological network using Leaky Integrate-and-Fire neurons and rate coding (`snn.py`).
+3. **Recurrent Spiking Neural Network (RSNN)**: An SNN equipped with internal recurrent memory loops for complex temporal tasks (`rsnn.py`).
 
-## Current Progress & Project Structure
-- `src/env.py`: ViZDoom environment setup, observation extraction, and frame preprocessing (grayscale, 84x84).
-- `src/network.py`: Spiking Convolutional Neural Network (SCNN) using `snnTorch` with Leaky Integrate-and-Fire (LIF) neurons and rate-coded visual input.
-- `src/train.py`: Training loop for the Spiking Deep Q-Network (SDQN) with Hardware Constraints (Sparsity Penalty & Weight Quantization) and TensorBoard logging.
-- `requirements.txt`: Python dependencies.
-- `proposal.md`: Initial project proposal, architecture details, and FPGA deployment strategy.
+## 🛠️ Installation
 
-## Installation
-1. Clone the repository and install the dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
-2. Download the required ViZDoom scenario files (e.g., `basic.cfg` and `basic.wad`) from the [ViZDoom repository](https://github.com/Farama-Foundation/ViZDoom/tree/master/scenarios) and place them in the project root.
-
-## Usage
-**1. Test the Environment**
-Verify that ViZDoom is initializing correctly and capturing frames:
+Make sure you have Python installed, and then install the required dependencies:
 ```bash
-python src/env.py
+pip install torch torchvision
+pip install snntorch
+pip install vizdoom
+pip install tensorboard
 ```
+*Note: You will also need the DOOM `basic.wad` and `basic.cfg` files in the root directory for the ViZDoom environment to function.*
 
-**2. Test the Spiking Neural Network**
-Verify the network structure and forward pass:
-```bash
-python src/network.py
+## 🚀 How to Use
+
+### 1. Training a Model
+Open `src/train.py` and set the `MODEL_TYPE` variable at the top of the file to choose which brain you want to train:
+```python
+MODEL_TYPE = "SNN" # Options: "SNN", "FFNN", "RSNN"
 ```
-
-**3. Run the Training Loop**
-Start training the Spiking DQN agent:
+Then, run the training script from the root directory:
 ```bash
 python src/train.py
 ```
+This will automatically save the best performing weights to the `models/` directory (e.g., `models/best_snn.pth`).
 
-**4. Monitor Training with TensorBoard**
-To view the training progress (Loss, Reward, Epsilon):
+### 2. Evaluating a Model
+To watch the fully trained AI play DOOM without any random exploration (Epsilon = 0), open `src/eval.py`, ensure the `MODEL_TYPE` matches the brain you want to test, and run:
+```bash
+python src/eval.py
+```
+
+### 3. Visualizing Training Progress
+The training script automatically logs metrics like Reward and Epsilon decay. You can view interactive graphs of your AI's learning curve by starting a TensorBoard server:
 ```bash
 tensorboard --logdir runs
 ```
+Navigate to `http://localhost:6006` in your web browser to view the dashboard.
+
+## 📖 Deep Dive
+For a comprehensive line-by-line breakdown of how the environment, spiking mechanics, and Deep Q-Network training loop work, please refer to the `code_walkthrough.md` file!
