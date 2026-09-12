@@ -27,7 +27,10 @@ TAU = 0.005 # Soft update rate
 NUM_EPISODES = 200
 SPARSITY_WEIGHT = 1e-6 # Lowered so it doesn't overpower the RL loss
 REWARD_SCALE = 100.0
+
+####### Choose the model #######
 MODEL_TYPE = "SNN" # Options: "SNN", "FFNN", "RSNN"
+################################
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
