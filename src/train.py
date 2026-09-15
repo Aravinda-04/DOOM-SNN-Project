@@ -20,17 +20,25 @@ BATCH_SIZE = 64
 GAMMA = 0.99
 EPS_START = 1.0
 EPS_END = 0.1
-EPS_DECAY = 3000 # Much faster decay so the agent actually exploits
+EPS_DECAY = 20000 # Much slower decay for long-term exploration
 LR = 1e-4
 MEMORY_SIZE = 10000
-TAU = 0.005 # Soft update rate
-NUM_EPISODES = 200
-SPARSITY_WEIGHT = 1e-6 # Lowered so it doesn't overpower the RL loss
+REPLAY_START_SIZE = 1000 # Wait before optimizing to avoid overfitting to first few frames
+TAU = 0.001 # Slower soft update rate for stability
+NUM_EPISODES = 500
+SPARSITY_WEIGHT = 1e-9 # Lowered significantly so it doesn't overpower the RL loss
 REWARD_SCALE = 100.0
 
 ####### Choose the model #######
 MODEL_TYPE = "SNN" # Options: "SNN", "FFNN", "RSNN"
 ################################
+
+print("#############################################")
+
+print(f"No of episodes {NUM_EPISODES}")
+
+print("############################################")
+
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
@@ -49,7 +57,7 @@ class ReplayMemory:
         return len(self.memory)
 
 def optimize_model(memory, policy_net, target_net, optimizer, criterion):
-    if len(memory) < BATCH_SIZE:
+    if len(memory) < REPLAY_START_SIZE:
         return None
     
     transitions = memory.sample(BATCH_SIZE)
@@ -167,16 +175,17 @@ def main():
 
             # Perform one step of the optimization
             loss = optimize_model(memory, policy_net, target_net, optimizer, criterion)
-            apply_weight_constraints(policy_net)
-            
-            # Soft update of target network
-            target_net_state_dict = target_net.state_dict()
-            policy_net_state_dict = policy_net.state_dict()
-            for key in policy_net_state_dict:
-                target_net_state_dict[key] = policy_net_state_dict[key]*TAU + target_net_state_dict[key]*(1-TAU)
-            target_net.load_state_dict(target_net_state_dict)
             
             if loss is not None:
+                apply_weight_constraints(policy_net)
+                
+                # Soft update of target network ONLY when training
+                target_net_state_dict = target_net.state_dict()
+                policy_net_state_dict = policy_net.state_dict()
+                for key in policy_net_state_dict:
+                    target_net_state_dict[key] = policy_net_state_dict[key]*TAU + target_net_state_dict[key]*(1-TAU)
+                target_net.load_state_dict(target_net_state_dict)
+                
                 writer.add_scalar('Loss', loss, steps_done)
             
         episode_time = time.time() - start_time
