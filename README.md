@@ -54,6 +54,19 @@ cd /d "E:\Side project"
 python src\train.py --model snn --episodes 100 --seed 0 --run-id snn-search-seed0 --eps-end 0.2 --eps-decay 5000 --eval-interval 10 --eval-episodes 2 --eval-seeds 0 1 2 --easy-target-offset 0.1 --device auto
 ```
 
+For balanced hard-left/hard-right fine-tuning with training-only aiming reward
+shaping:
+
+```cmd
+python src\train.py --model snn --episodes 1000 --seed 0 --run-id snn-1000-balanced-seed0 --resume models\snn\deployment-candidates\snn-hardspawn-91pct.pth --eps-start 1.0 --eps-end 0.1 --eps-decay 10000 --eval-interval 25 --eval-episodes 3 --eval-seeds 0 1 2 3 4 --balanced-training --balanced-evaluation --max-spawn-attempts 1000 --easy-target-offset 0.1 --aim-progress-weight 20 --off-target-attack-penalty 4 --device auto
+```
+
+Balanced training alternates accepted hard-left and hard-right starts. Object
+labels reward turns that reduce target offset and penalize off-target attacks,
+but labels are never passed into the policy network. Balanced evaluation runs
+equal samples in both directions, and checkpoint selection maximizes the worse
+direction before considering aggregate success and reward.
+
 The replay reward receives a small penalty after eight identical consecutive
 actions and when a movement action makes no measurable progress. TensorBoard
 continues to show the unmodified game reward. ViZDoom object labels identify

@@ -36,6 +36,7 @@ def save_checkpoint(
     best_eval_success: float | None = None,
     best_eval_noninstant_success: float | None = None,
     best_eval_hard_success: float | None = None,
+    best_eval_worst_direction: float | None = None,
 ) -> None:
     """Save enough state to evaluate or resume an experiment."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -54,6 +55,8 @@ def save_checkpoint(
         payload["best_eval_noninstant_success"] = best_eval_noninstant_success
     if best_eval_hard_success is not None:
         payload["best_eval_hard_success"] = best_eval_hard_success
+    if best_eval_worst_direction is not None:
+        payload["best_eval_worst_direction"] = best_eval_worst_direction
     torch.save(payload, path)
 
 

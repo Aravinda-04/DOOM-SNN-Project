@@ -60,6 +60,11 @@ class TrainingConfig:
     stalled_move_penalty: float
     instant_kill_steps: int
     easy_target_offset: float
+    balanced_training: bool
+    balanced_evaluation: bool
+    max_spawn_attempts: int
+    aim_progress_weight: float
+    off_target_attack_penalty: float
     weight_clip: float | None
     seed: int
     config_path: str
@@ -78,6 +83,62 @@ class ReplayMemory:
 
     def __len__(self):
         return len(self.memory)
+
+
+def spawn_category(info: dict, easy_target_offset: float) -> str:
+    offset = info.get("target_horizontal_offset")
+    if not info.get("target_visible") or offset is None:
+        return "invisible"
+    if abs(offset) <= easy_target_offset:
+        return "easy"
+    return "hard_left" if offset < 0 else "hard_right"
+
+
+def reset_for_spawn(
+    env: DoomEnvironment,
+    category: str,
+    easy_target_offset: float,
+    max_attempts: int,
+) -> tuple[np.ndarray, dict, int]:
+    for attempt in range(1, max_attempts + 1):
+        state = env.reset()
+        info = env.diagnostics()
+        if spawn_category(info, easy_target_offset) == category:
+            return state, info, attempt
+    raise RuntimeError(
+        f"Could not find a {category} spawn after {max_attempts} resets."
+    )
+
+
+def aiming_reward(
+    before_info: dict,
+    after_info: dict,
+    action_name: str,
+    *,
+    easy_target_offset: float,
+    progress_weight: float,
+    off_target_attack_penalty: float,
+) -> tuple[float, bool]:
+    """Training-only privileged reward; labels never enter the policy input."""
+    reward = 0.0
+    before_offset = before_info.get("target_horizontal_offset")
+    after_offset = after_info.get("target_horizontal_offset")
+    if (
+        before_info.get("target_visible")
+        and after_info.get("target_visible")
+        and before_offset is not None
+        and after_offset is not None
+    ):
+        reward += progress_weight * (abs(before_offset) - abs(after_offset))
+
+    off_target_attack = action_name == "attack" and (
+        not before_info.get("target_visible")
+        or before_offset is None
+        or abs(before_offset) > easy_target_offset
+    )
+    if off_target_attack:
+        reward -= off_target_attack_penalty
+    return reward, off_target_attack
 
 
 def optimize_model(
@@ -154,57 +215,70 @@ def evaluate_policy(
     seeds: tuple[int, ...],
     instant_kill_steps: int,
     easy_target_offset: float,
-) -> tuple[list[float], float, float, float]:
-    """Return rewards and total, non-instant, and hard-spawn success rates."""
+    balanced: bool,
+    max_spawn_attempts: int,
+) -> dict:
+    """Evaluate natural episodes or equal hard-left/hard-right episodes."""
     was_training = policy_net.training
     policy_net.eval()
     rewards = []
     successes = []
     noninstant_successes = []
     hard_spawn_results = []
+    directional_results = {"hard_left": [], "hard_right": []}
     try:
         for seed in seeds:
             with DoomEnvironment(config_file=config_path, render=False, seed=seed) as env:
-                for _ in range(episodes_per_seed):
-                    state = env.reset()
-                    start_info = env.diagnostics()
-                    start_kills = start_info["kill_count"] or 0.0
-                    offset = start_info["target_horizontal_offset"]
-                    easy_spawn = (
-                        start_info["target_visible"]
-                        and offset is not None
-                        and abs(offset) <= easy_target_offset
-                    )
-                    done = False
-                    episode_reward = 0.0
-                    decision_steps = 0
-                    while not done:
-                        state_tensor = (
-                            torch.from_numpy(state).unsqueeze(0).unsqueeze(0).to(device)
-                        )
-                        with torch.no_grad():
-                            q_values, _ = policy_net(state_tensor)
-                        action = q_values.argmax(1).item()
-                        state, reward, done = env.step(action)
-                        episode_reward += reward
-                        decision_steps += 1
-                    end_kills = env.diagnostics()["kill_count"] or 0.0
-                    rewards.append(episode_reward)
-                    success = end_kills > start_kills
-                    successes.append(success)
-                    noninstant_successes.append(
-                        success and decision_steps > instant_kill_steps
-                    )
-                    if not easy_spawn:
-                        hard_spawn_results.append(success)
+                categories = (
+                    ("hard_left", "hard_right") if balanced else (None,)
+                )
+                for requested_category in categories:
+                    for _ in range(episodes_per_seed):
+                        if requested_category is None:
+                            state = env.reset()
+                            start_info = env.diagnostics()
+                        else:
+                            state, start_info, _ = reset_for_spawn(
+                                env,
+                                requested_category,
+                                easy_target_offset,
+                                max_spawn_attempts,
+                            )
+                        start_kills = start_info["kill_count"] or 0.0
+                        category = spawn_category(start_info, easy_target_offset)
+                        done = False
+                        episode_reward = 0.0
+                        decision_steps = 0
+                        while not done:
+                            state_tensor = torch.from_numpy(state).unsqueeze(0).unsqueeze(0).to(device)
+                            with torch.no_grad():
+                                q_values, _ = policy_net(state_tensor)
+                            action = q_values.argmax(1).item()
+                            state, reward, done = env.step(action)
+                            episode_reward += reward
+                            decision_steps += 1
+                        end_kills = env.diagnostics()["kill_count"] or 0.0
+                        rewards.append(episode_reward)
+                        success = end_kills > start_kills
+                        successes.append(success)
+                        noninstant_successes.append(success and decision_steps > instant_kill_steps)
+                        if category != "easy":
+                            hard_spawn_results.append(success)
+                        if category in directional_results:
+                            directional_results[category].append(success)
     finally:
         policy_net.train(was_training)
-    return (
-        rewards,
-        float(np.mean(successes)),
-        float(np.mean(noninstant_successes)),
-        float(np.mean(hard_spawn_results)) if hard_spawn_results else 0.0,
-    )
+    left_rate = float(np.mean(directional_results["hard_left"])) if directional_results["hard_left"] else 0.0
+    right_rate = float(np.mean(directional_results["hard_right"])) if directional_results["hard_right"] else 0.0
+    return {
+        "rewards": rewards,
+        "success_rate": float(np.mean(successes)),
+        "noninstant_success_rate": float(np.mean(noninstant_successes)),
+        "hard_success_rate": float(np.mean(hard_spawn_results)) if hard_spawn_results else 0.0,
+        "left_success_rate": left_rate,
+        "right_success_rate": right_rate,
+        "worst_direction_success_rate": min(left_rate, right_rate),
+    }
 
 
 def parse_args() -> argparse.Namespace:
@@ -230,6 +304,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--stalled-move-penalty", type=float, default=2.0)
     parser.add_argument("--instant-kill-steps", type=int, default=2)
     parser.add_argument("--easy-target-offset", type=float, default=0.1)
+    parser.add_argument("--balanced-training", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--balanced-evaluation", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--max-spawn-attempts", type=int, default=1000)
+    parser.add_argument("--aim-progress-weight", type=float, default=20.0)
+    parser.add_argument("--off-target-attack-penalty", type=float, default=4.0)
     parser.add_argument("--weight-clip", type=float, default=5.0)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH)
@@ -268,6 +347,10 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--instant-kill-steps must be positive.")
     if not 0 <= args.easy_target_offset <= 1:
         raise ValueError("--easy-target-offset must be between 0 and 1.")
+    if args.max_spawn_attempts < 1:
+        raise ValueError("--max-spawn-attempts must be positive.")
+    if args.aim_progress_weight < 0 or args.off_target_attack_penalty < 0:
+        raise ValueError("Aiming reward values cannot be negative.")
 
 
 def main() -> None:
@@ -307,6 +390,11 @@ def main() -> None:
         stalled_move_penalty=args.stalled_move_penalty,
         instant_kill_steps=args.instant_kill_steps,
         easy_target_offset=args.easy_target_offset,
+        balanced_training=args.balanced_training,
+        balanced_evaluation=args.balanced_evaluation,
+        max_spawn_attempts=args.max_spawn_attempts,
+        aim_progress_weight=args.aim_progress_weight,
+        off_target_attack_penalty=args.off_target_attack_penalty,
         weight_clip=args.weight_clip,
         seed=args.seed,
         config_path=str(args.config.expanduser().resolve()),
@@ -339,6 +427,7 @@ def main() -> None:
         best_eval_success = -float("inf")
         best_eval_noninstant_success = -float("inf")
         best_eval_hard_success = -float("inf")
+        best_eval_worst_direction = -float("inf")
         if args.resume is not None:
             resume_state = load_checkpoint(args.resume, policy_net, device, optimizer)
             checkpoint_model = resume_state.get("config", {}).get("model")
@@ -360,6 +449,9 @@ def main() -> None:
             best_eval_hard_success = float(
                 resume_state.get("best_eval_hard_success", -float("inf"))
             )
+            best_eval_worst_direction = float(
+                resume_state.get("best_eval_worst_direction", -float("inf"))
+            )
             print(f"Resuming at episode {start_episode + 1}, step {steps_done}")
 
         if start_episode >= args.episodes:
@@ -373,8 +465,21 @@ def main() -> None:
         policy_net.train()
 
         for episode in range(start_episode, args.episodes):
-            state = env.reset()
+            if args.balanced_training:
+                requested_spawn = "hard_left" if episode % 2 == 0 else "hard_right"
+                state, _, spawn_attempts = reset_for_spawn(
+                    env,
+                    requested_spawn,
+                    args.easy_target_offset,
+                    args.max_spawn_attempts,
+                )
+            else:
+                requested_spawn = "natural"
+                spawn_attempts = 1
+                state = env.reset()
             total_reward = 0.0
+            total_shaping_reward = 0.0
+            off_target_attacks = 0
             done = False
             started_at = time.perf_counter()
             last_epsilon = args.eps_start
@@ -427,6 +532,17 @@ def main() -> None:
                         )
                         if displacement < 0.01:
                             shaped_reward -= args.stalled_move_penalty
+                aim_reward, off_target_attack = aiming_reward(
+                    before_info,
+                    after_info,
+                    env.action_names[action],
+                    easy_target_offset=args.easy_target_offset,
+                    progress_weight=args.aim_progress_weight,
+                    off_target_attack_penalty=args.off_target_attack_penalty,
+                )
+                shaped_reward += aim_reward
+                total_shaping_reward += aim_reward
+                off_target_attacks += int(off_target_attack)
                 memory.push(
                     state,
                     action,
@@ -457,22 +573,20 @@ def main() -> None:
             print(
                 f"Episode {episode + 1}/{args.episodes} | "
                 f"Reward: {total_reward:.1f} | Epsilon: {last_epsilon:.3f} | "
-                f"Time: {elapsed:.1f}s"
+                f"Spawn: {requested_spawn} ({spawn_attempts} resets) | "
+                f"Aim shaping: {total_shaping_reward:.1f} | Time: {elapsed:.1f}s"
             )
             writer.add_scalar("train/reward", total_reward, episode)
             writer.add_scalar("train/epsilon", last_epsilon, episode)
+            writer.add_scalar("train/aim_shaping_reward", total_shaping_reward, episode)
+            writer.add_scalar("train/off_target_attacks", off_target_attacks, episode)
 
             should_evaluate = (
                 (episode + 1) % args.eval_interval == 0
                 or episode + 1 == args.episodes
             )
             if should_evaluate:
-                (
-                    eval_rewards,
-                    eval_success,
-                    eval_noninstant_success,
-                    eval_hard_success,
-                ) = evaluate_policy(
+                evaluation = evaluate_policy(
                     args.config,
                     policy_net,
                     device,
@@ -480,7 +594,16 @@ def main() -> None:
                     tuple(args.eval_seeds),
                     args.instant_kill_steps,
                     args.easy_target_offset,
+                    args.balanced_evaluation,
+                    args.max_spawn_attempts,
                 )
+                eval_rewards = evaluation["rewards"]
+                eval_success = evaluation["success_rate"]
+                eval_noninstant_success = evaluation["noninstant_success_rate"]
+                eval_hard_success = evaluation["hard_success_rate"]
+                eval_left_success = evaluation["left_success_rate"]
+                eval_right_success = evaluation["right_success_rate"]
+                eval_worst_direction = evaluation["worst_direction_success_rate"]
                 eval_mean = float(np.mean(eval_rewards))
                 eval_std = float(np.std(eval_rewards))
                 writer.add_scalar("eval/mean_reward", eval_mean, episode)
@@ -494,18 +617,24 @@ def main() -> None:
                 writer.add_scalar(
                     "eval/hard_spawn_success_rate", eval_hard_success, episode
                 )
+                writer.add_scalar("eval/hard_left_success_rate", eval_left_success, episode)
+                writer.add_scalar("eval/hard_right_success_rate", eval_right_success, episode)
+                writer.add_scalar("eval/worst_direction_success_rate", eval_worst_direction, episode)
                 print(
-                    f"Evaluation | Hard-spawn: {eval_hard_success:.1%} | "
+                    f"Evaluation | Worst direction: {eval_worst_direction:.1%} | "
+                    f"Left: {eval_left_success:.1%} | Right: {eval_right_success:.1%} | "
+                    f"Hard-spawn: {eval_hard_success:.1%} | "
                     f"Non-instant: {eval_noninstant_success:.1%} | "
                     f"Success: {eval_success:.1%} | "
                     f"Mean: {eval_mean:.1f} | Std: {eval_std:.1f} | "
                     f"Episodes: {len(eval_rewards)}"
                 )
-                if (eval_hard_success, eval_success, eval_mean) > (
+                if (eval_worst_direction, eval_hard_success, eval_mean) > (
+                    best_eval_worst_direction,
                     best_eval_hard_success,
-                    best_eval_success,
                     best_eval_mean,
                 ):
+                    best_eval_worst_direction = eval_worst_direction
                     best_eval_hard_success = eval_hard_success
                     best_eval_noninstant_success = eval_noninstant_success
                     best_eval_success = eval_success
@@ -520,10 +649,12 @@ def main() -> None:
                         best_eval_success=best_eval_success,
                         best_eval_noninstant_success=best_eval_noninstant_success,
                         best_eval_hard_success=best_eval_hard_success,
+                        best_eval_worst_direction=best_eval_worst_direction,
                         config=config_dict,
                     )
                     print(
-                        f"New best: {best_eval_hard_success:.1%} hard-spawn, "
+                        f"New best: {best_eval_worst_direction:.1%} worst direction, "
+                        f"{best_eval_hard_success:.1%} hard-spawn, "
                         f"{best_eval_noninstant_success:.1%} non-instant, "
                         f"{best_eval_success:.1%} total success, "
                         f"mean reward {best_eval_mean:.1f}"
@@ -539,6 +670,7 @@ def main() -> None:
                 best_eval_success=best_eval_success,
                 best_eval_noninstant_success=best_eval_noninstant_success,
                 best_eval_hard_success=best_eval_hard_success,
+                best_eval_worst_direction=best_eval_worst_direction,
                 config=config_dict,
             )
             writer.flush()

@@ -181,4 +181,28 @@ reported 77% total success, 50% hard-spawn success (21/42), mean reward -64.0,
 and 4 suspected loop episodes. It demonstrates genuine search behavior, but
 50% hard-spawn success is not deployment-ready.
 
+## Balanced aiming fine-tuning
+
+- Added `--balanced-training` to alternate hard-left and hard-right initial
+  conditions, with bounded spawn sampling.
+- Added training-only visual aiming reward: reducing absolute target offset is
+  rewarded, while firing at an invisible or off-centre target is penalized.
+  Object labels remain privileged training signals and are not SNN inputs.
+- Added balanced evaluation with equal left/right samples and TensorBoard
+  metrics for left, right, and worst-direction success.
+- Checkpoint selection now prioritizes worst-direction success, then aggregate
+  hard-spawn success and mean reward.
+- Added unit coverage for spawn classification and aiming reward behavior.
+
+Fine-tuning resumed the archived 91% checkpoint at episode 776 in a separate
+`snn-1000-balanced-seed0` run. The selected episode-950 checkpoint achieved
+100% on its 30-case balanced validation set. On the established unseen-seed
+benchmark of 100 filtered hard spawns (seeds 10-14), it achieved 99% success,
+median reward 87, mean reward 79.5, and zero loop flags. A rendered four-case
+left/right verification also achieved 4/4 successes.
+
+The deployment copy is
+`models/snn/deployment-candidates/snn-balanced-hardspawn-99pct.pth`; its SHA-256
+is `c698ec68e5d818a666037a2524f639712ed768bb8e5c82f997a815874a3eff94`.
+
 Run `--help` on any command for its complete options.
