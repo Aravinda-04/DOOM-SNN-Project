@@ -19,6 +19,7 @@ from env import DoomEnvironment
 from eval import find_default_checkpoint
 from networks import MODEL_NAMES, build_model
 from project_paths import DEFAULT_CONFIG_PATH, REPORT_ROOT
+from quantization import dequantize_state_dict
 from runtime_utils import resolve_device, set_random_seeds
 
 
@@ -68,6 +69,29 @@ def checkpoint_sha256(path: Path) -> str:
         for block in iter(lambda: checkpoint_file.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def load_quantized_policy(
+    path: Path, model_name: str, device: torch.device
+) -> tuple[torch.nn.Module, dict, int]:
+    """Reconstruct a PyTorch policy from an integer interchange export."""
+    export_path = path.expanduser().resolve()
+    if not export_path.is_file():
+        raise FileNotFoundError(f"Quantized export not found: {export_path}")
+    payload = torch.load(export_path, map_location="cpu", weights_only=True)
+    required = {"quantized_state_dict", "scales", "bits", "model"}
+    missing = required.difference(payload)
+    if missing:
+        raise ValueError(f"Quantized export is missing: {sorted(missing)}")
+    if payload["model"] != model_name:
+        raise ValueError(
+            f"Export contains model '{payload['model']}', not '{model_name}'."
+        )
+    quantized_state = payload["quantized_state_dict"]
+    action_size = int(quantized_state["fc2.weight"].shape[0])
+    policy = build_model(model_name, action_size=action_size).to(device)
+    policy.load_state_dict(dequantize_state_dict(quantized_state, payload["scales"]))
+    return policy, payload, action_size
 
 
 def classify_termination(start_info: dict, end_info: dict) -> tuple[bool, str]:
@@ -384,6 +408,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--model", choices=MODEL_NAMES, default="snn")
     parser.add_argument("--checkpoint", type=Path)
+    parser.add_argument(
+        "--quantized-export",
+        type=Path,
+        help="Evaluate a saved integer export after dequantized reconstruction.",
+    )
     parser.add_argument("--episodes", type=int, default=20, help="Episodes per seed.")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--seeds", type=int, nargs="+")
@@ -427,15 +456,21 @@ def main() -> None:
         raise ValueError("--seeds must not contain duplicates.")
 
     device = resolve_device(args.device)
-    checkpoint_path = (
-        args.checkpoint.expanduser().resolve()
-        if args.checkpoint is not None
-        else find_default_checkpoint(args.model)
+    if args.quantized_export is not None and args.checkpoint is not None:
+        raise ValueError("Use either --checkpoint or --quantized-export, not both.")
+    artifact_path = (
+        args.quantized_export.expanduser().resolve()
+        if args.quantized_export is not None
+        else (
+            args.checkpoint.expanduser().resolve()
+            if args.checkpoint is not None
+            else find_default_checkpoint(args.model)
+        )
     )
     checkpoint_label = (
-        checkpoint_path.parent.name
-        if checkpoint_path.name in ("best.pth", "latest.pth")
-        else checkpoint_path.stem
+        artifact_path.parent.name
+        if artifact_path.name in ("best.pth", "latest.pth")
+        else artifact_path.stem
     )
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     report_dir = (
@@ -448,20 +483,29 @@ def main() -> None:
     report_dir.mkdir(parents=True, exist_ok=True)
 
     set_random_seeds(seeds[0])
-    action_size = checkpoint_action_size(checkpoint_path)
-    policy_net = build_model(args.model, action_size=action_size).to(device)
-    checkpoint = load_checkpoint(checkpoint_path, policy_net, device)
-    checkpoint_model = checkpoint.get("config", {}).get("model")
-    if checkpoint_model and checkpoint_model != args.model:
-        raise ValueError(
-            f"Checkpoint contains model '{checkpoint_model}', not '{args.model}'."
+    quantized_metadata = None
+    if args.quantized_export is not None:
+        policy_net, quantized_metadata, action_size = load_quantized_policy(
+            artifact_path, args.model, device
         )
+        artifact_type = "quantized_export"
+    else:
+        action_size = checkpoint_action_size(artifact_path)
+        policy_net = build_model(args.model, action_size=action_size).to(device)
+        checkpoint = load_checkpoint(artifact_path, policy_net, device)
+        checkpoint_model = checkpoint.get("config", {}).get("model")
+        if checkpoint_model and checkpoint_model != args.model:
+            raise ValueError(
+                f"Checkpoint contains model '{checkpoint_model}', not '{args.model}'."
+            )
+        artifact_type = "floating_checkpoint"
     policy_net.eval()
     recorder = SpikeActivityRecorder(policy_net)
     writer = SummaryWriter(log_dir=str(report_dir / "tensorboard"))
 
     print(f"Diagnosing {args.model.upper()} on {device}")
-    print(f"Checkpoint: {checkpoint_path}")
+    print(f"Artifact: {artifact_path}")
+    print(f"Artifact type: {artifact_type}")
     print(f"Seeds: {', '.join(map(str, seeds))}")
     print(f"Spawn filter: {args.spawn_filter}")
     print(f"Report: {report_dir}")
@@ -587,8 +631,19 @@ def main() -> None:
     report = {
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "model": args.model,
-        "checkpoint": str(checkpoint_path),
-        "checkpoint_sha256": checkpoint_sha256(checkpoint_path),
+        "artifact": str(artifact_path),
+        "artifact_type": artifact_type,
+        "artifact_sha256": checkpoint_sha256(artifact_path),
+        "quantization": (
+            {
+                "bits": quantized_metadata["bits"],
+                "format": quantized_metadata.get("format"),
+                "source_checkpoint": quantized_metadata.get("source_checkpoint"),
+                "export_validation": quantized_metadata.get("validation"),
+            }
+            if quantized_metadata is not None
+            else None
+        ),
         "device": str(device),
         "episodes_per_seed": args.episodes,
         "instant_kill_steps": args.instant_kill_steps,

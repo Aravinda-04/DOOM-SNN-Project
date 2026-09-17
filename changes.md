@@ -205,4 +205,21 @@ The deployment copy is
 `models/snn/deployment-candidates/snn-balanced-hardspawn-99pct.pth`; its SHA-256
 is `c698ec68e5d818a666037a2524f639712ed768bb8e5c82f997a815874a3eff94`.
 
+## End-to-end INT8 verification
+
+- `diagnose.py` now accepts `--quantized-export`, validates the interchange
+  metadata, reconstructs the network from integer tensors and scales, and runs
+  it through the same rendered or headless ViZDoom diagnostics as FP32.
+- Added a reconstruction test and `src/compare_reports.py` for visual FP32/INT8
+  report comparisons.
+- Export-time random-input error was 0.01495 mean absolute and 0.04810 maximum.
+- Visual INT8 verification passed 4/4 filtered hard episodes.
+- On the matched 100-hard-spawn unseen-seed benchmark, FP32 and reconstructed
+  INT8 both achieved 99% success and zero loop flags. INT8 achieved 100% on
+  hard-left (52/52), 97.9% on hard-right (47/48), median reward 87, and mean
+  reward 79.77. FP32 achieved 98.1% left and 100% right with mean reward 79.45.
+- Outcomes agreed on 98/100 episodes; 64/100 complete action sequences were
+  identical. This validates software quantization behavior, but does not yet
+  validate fixed-point neuron dynamics or the PeraMorphIQ hardware runtime.
+
 Run `--help` on any command for its complete options.

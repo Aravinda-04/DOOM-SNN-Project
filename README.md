@@ -187,6 +187,17 @@ python src/export_quantized.py --model snn \
 
 The result is an integer interchange file, not a vendor-specific FPGA image.
 
+Evaluate the exported integer tensors end to end in ViZDoom after dequantized
+reconstruction:
+
+```cmd
+python src\diagnose.py --model snn --quantized-export exports\snn-balanced-hardspawn-99pct-int8.pt --episodes 20 --seeds 10 11 12 13 14 --spawn-filter hard --easy-target-offset 0.1 --max-spawn-attempts 1000 --device auto
+```
+
+Add `--render --delay 0.05` with fewer episodes for visual verification. Create
+a side-by-side report chart with `src/compare_reports.py`; run `--help` for its
+report paths and labels.
+
 ## Architecture note
 
 The SNN and RSNN currently use deterministic direct coding: continuous pixels
