@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 import snntorch as snn
-from snntorch import spikegen
 
 class SpikingQNetwork(nn.Module):
     def __init__(self, action_size=3, num_steps=10, beta=0.9):
@@ -43,20 +42,15 @@ class SpikingQNetwork(nn.Module):
         mem4 = self.lif4.init_leaky()
         mem5 = self.lif5.init_leaky()
         
-        # Generate spike train using rate coding (Pixel intensity -> Spike probability)
-        # Resulting shape: (num_steps, Batch, 1, 84, 84)
-        spike_in = spikegen.rate(x, num_steps=self.num_steps)
-        
         # We will accumulate the membrane potential of the output layer over time
         # to represent the Q-values.
         q_values = torch.zeros(x.size(0), self.action_size, device=x.device)
         total_spikes = torch.tensor(0.0, device=x.device)
         
         for step in range(self.num_steps):
-            # Pass the spikes for the current time step through the network
-            cur_in = spike_in[step]
-            
-            cur_conv1 = self.conv1(cur_in)
+            # Pass the raw deterministic input directly into the first convolutional layer.
+            # The first Leaky layer (lif1) will naturally convert it into spikes!
+            cur_conv1 = self.conv1(x)
             spk1, mem1 = self.lif1(cur_conv1, mem1)
             
             cur_conv2 = self.conv2(spk1)

@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 import snntorch as snn
-from snntorch import spikegen
 
 class RSNNQNetwork(nn.Module):
     def __init__(self, action_size=3, num_steps=10, beta=0.9):
@@ -41,8 +40,6 @@ class RSNNQNetwork(nn.Module):
         mem4 = self.lif4.init_leaky()
         mem5 = self.lif5.init_leaky()
         
-        spike_in = spikegen.rate(x, num_steps=self.num_steps)
-        
         q_values = torch.zeros(x.size(0), self.action_size, device=x.device)
         total_spikes = torch.tensor(0.0, device=x.device)
         
@@ -50,9 +47,8 @@ class RSNNQNetwork(nn.Module):
         spk4 = torch.zeros(x.size(0), 512, device=x.device)
         
         for step in range(self.num_steps):
-            cur_in = spike_in[step]
-            
-            cur_conv1 = self.conv1(cur_in)
+            # Deterministic Direct Coding
+            cur_conv1 = self.conv1(x)
             spk1, mem1 = self.lif1(cur_conv1, mem1)
             
             cur_conv2 = self.conv2(spk1)

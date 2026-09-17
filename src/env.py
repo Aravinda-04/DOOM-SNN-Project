@@ -1,42 +1,61 @@
 import vizdoom as vzd
 import numpy as np
 import cv2
+from pathlib import Path
+
+from project_paths import DEFAULT_CONFIG_PATH
 
 class DoomEnvironment:
-    def __init__(self, config_file="basic.cfg", render=False):
+    def __init__(self, config_file=None, render=False, seed=None):
         """
         Initializes the ViZDoom environment.
         :param config_file: The ViZDoom configuration file to load (e.g., basic.cfg).
         :param render: Whether to show the game window.
+        :param seed: Optional ViZDoom random seed.
         """
         self.game = vzd.DoomGame()
-        
-        # Try to load the scenario configuration
+
+        config_path = Path(config_file or DEFAULT_CONFIG_PATH).expanduser().resolve()
+        if not config_path.is_file():
+            raise FileNotFoundError(f"ViZDoom configuration not found: {config_path}")
+
         try:
-            # We assume basic.cfg is available in the run directory or ViZDoom path
-            self.game.load_config(config_file)
+            self.game.load_config(str(config_path))
+            if seed is not None:
+                self.game.set_seed(seed)
+
+            # Optimize performance by reducing resolution since the AI doesn't need 4K
+            self.game.set_screen_resolution(vzd.ScreenResolution.RES_160X120)
+            # Use grayscale because color is not strictly necessary for basic tasks and saves memory
+            self.game.set_screen_format(vzd.ScreenFormat.GRAY8)
+
+            # Display the window if requested
+            self.game.set_window_visible(render)
+
+            # Start the engine
+            self.game.init()
         except Exception as e:
-            print(f"Warning: Could not load config '{config_file}'. Error: {e}")
-            print("Please ensure you have the ViZDoom scenario files (e.g., basic.cfg and basic.wad) in the project root.")
-            
-        # Optimize performance by reducing resolution since the AI doesn't need 4K
-        self.game.set_screen_resolution(vzd.ScreenResolution.RES_160X120)
-        # Use grayscale because color is not strictly necessary for basic tasks and saves memory
-        self.game.set_screen_format(vzd.ScreenFormat.GRAY8)
-        
-        # Display the window if requested
-        self.game.set_window_visible(render)
-        
-        # Start the engine
-        self.game.init()
+            self.game.close()
+            raise RuntimeError(
+                f"Could not initialize ViZDoom with config '{config_path}': {e}"
+            ) from e
         
         # Define the action space. For basic.cfg, we have 3 buttons: MOVE_LEFT, MOVE_RIGHT, ATTACK
         # An action is passed as a boolean list corresponding to these buttons
         self.actions = [
-            [True, False, False],  # 0: Move Left
-            [False, True, False],  # 1: Move Right
-            [False, False, True]   # 2: Attack
+            [True, False, False, False, False],   # 0: Move Left
+            [False, True, False, False, False],   # 1: Move Right
+            [False, False, True, False, False],   # 2: Turn Left
+            [False, False, False, True, False],   # 3: Turn Right
+            [False, False, False, False, True],   # 4: Attack
         ]
+        self.action_names = (
+            "move_left",
+            "move_right",
+            "turn_left",
+            "turn_right",
+            "attack",
+        )
         
     def preprocess_frame(self, frame):
         """
@@ -76,9 +95,57 @@ class DoomEnvironment:
             
         return next_state, reward, done
 
+    def diagnostics(self):
+        """Return game variables used for evaluation diagnostics."""
+        variables = {
+            "ammo": vzd.GameVariable.AMMO2,
+            "kill_count": vzd.GameVariable.KILLCOUNT,
+            "position_x": vzd.GameVariable.POSITION_X,
+            "position_y": vzd.GameVariable.POSITION_Y,
+        }
+        values = {}
+        for name, variable in variables.items():
+            try:
+                values[name] = float(self.game.get_game_variable(variable))
+            except Exception:
+                values[name] = None
+
+        target_visible = False
+        target_horizontal_offset = None
+        if not self.game.is_episode_finished():
+            state = self.game.get_state()
+            labels = [
+                label
+                for label in (state.labels if state is not None else [])
+                if label.object_name != "DoomPlayer"
+            ]
+            if labels:
+                target = max(labels, key=lambda label: label.width * label.height)
+                target_visible = True
+                target_center_x = target.x + target.width / 2
+                target_horizontal_offset = (target_center_x - 80.0) / 80.0
+
+        values.update(
+            {
+                "episode_time": int(self.game.get_episode_time()),
+                "total_reward": float(self.game.get_total_reward()),
+                "player_dead": bool(self.game.is_player_dead()),
+                "finished": bool(self.game.is_episode_finished()),
+                "target_visible": target_visible,
+                "target_horizontal_offset": target_horizontal_offset,
+            }
+        )
+        return values
+
     def close(self):
         """Shuts down the ViZDoom engine cleanly."""
         self.game.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.close()
 
 if __name__ == "__main__":
     # Quick test to ensure the environment works
