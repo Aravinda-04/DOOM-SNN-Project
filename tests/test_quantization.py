@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 import torch
 
 from quantization import dequantize_state_dict, quantize_state_dict
@@ -23,15 +24,16 @@ def test_symmetric_quantization_produces_bounded_integer_tensors():
     assert torch.max(torch.abs(reconstructed["weight"] - state["weight"])) <= scales["weight"] / 2
 
 
-def test_quantized_export_can_reconstruct_policy(tmp_path):
-    source = build_model("snn", action_size=5)
+@pytest.mark.parametrize("model_name", ["snn", "cnn"])
+def test_quantized_export_can_reconstruct_policy(tmp_path, model_name):
+    source = build_model(model_name, action_size=5)
     quantized, scales = quantize_state_dict(source.state_dict(), bits=8)
     path = tmp_path / "snn-int8.pt"
     torch.save(
         {
             "format": "symmetric_per_tensor",
             "bits": 8,
-            "model": "snn",
+            "model": model_name,
             "quantized_state_dict": quantized,
             "scales": scales,
         },
@@ -39,7 +41,7 @@ def test_quantized_export_can_reconstruct_policy(tmp_path):
     )
 
     restored, metadata, action_size = load_quantized_policy(
-        path, "snn", torch.device("cpu")
+        path, model_name, torch.device("cpu")
     )
 
     assert action_size == 5

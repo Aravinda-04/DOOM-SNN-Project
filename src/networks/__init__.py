@@ -1,11 +1,13 @@
 """Network registry used by training, evaluation, and export commands."""
 
+from .cnn import CNNQNetwork
 from .ffnn import FeedForwardQNetwork
 from .rsnn import RSNNQNetwork
 from .snn import SpikingQNetwork
 
 
 MODEL_CLASSES = {
+    "cnn": CNNQNetwork,
     "ffnn": FeedForwardQNetwork,
     "rsnn": RSNNQNetwork,
     "snn": SpikingQNetwork,
@@ -27,6 +29,7 @@ def build_model(model_name: str, action_size: int = 3, **kwargs):
 
 
 __all__ = [
+    "CNNQNetwork",
     "FeedForwardQNetwork",
     "MODEL_CLASSES",
     "MODEL_NAMES",

@@ -74,7 +74,7 @@ def main() -> None:
     axes[1].grid(axis="y", alpha=0.25)
     axes[1].bar_label(bars, fmt="%.2f")
 
-    figure.suptitle("Floating-point vs quantized SNN verification")
+    figure.suptitle(f"{args.baseline_label} vs {args.candidate_label} verification")
     figure.tight_layout()
     output = args.output.expanduser().resolve()
     output.parent.mkdir(parents=True, exist_ok=True)

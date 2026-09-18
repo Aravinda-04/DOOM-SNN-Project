@@ -1,8 +1,8 @@
 # DOOM Spiking Neural Network Accelerator
 
 This project trains neural networks to play the ViZDoom `basic` scenario. It
-compares a conventional feed-forward CNN (FFNN), a spiking CNN (SNN), and a
-recurrent spiking CNN (RSNN) before exporting integer weights for later FPGA
+compares a dueling CNN (CNN), a conventional feed-forward CNN (FFNN), a
+spiking CNN (SNN), and a recurrent spiking CNN (RSNN) before exporting integer weights for later FPGA
 integration.
 
 ## Project status
@@ -10,7 +10,7 @@ integration.
 Implemented:
 
 - ViZDoom environment with normalized `84 x 84` grayscale observations.
-- FFNN, SNN, and RSNN policies with a shared interface.
+- CNN, FFNN, SNN, and RSNN policies with a shared interface.
 - DQN training with experience replay and soft target updates.
 - Isolated experiment directories and TensorBoard logs.
 - Greedy multi-episode validation for best-checkpoint selection.
@@ -32,8 +32,17 @@ Python 3.13 is the tested interpreter. Install the pinned dependencies:
 python -m pip install -r requirements.txt
 ```
 
-The tracked `basic.cfg` and `basic.wad` files must remain in the repository
-root. Runtime paths are resolved from the source location, so commands can be
+The experiment's `basic.cfg` and `basic.wad` files must be supplied in the
+repository root (these assets are ignored by Git). Use the same scenario files
+as the SNN baseline, including its five action buttons and object labels.
+ViZDoom bundles starting assets under
+`.venv/Lib/site-packages/vizdoom/scenarios/`. Copy `basic.cfg` and `basic.wad`
+to the project root, then set `available_buttons` to `MOVE_LEFT MOVE_RIGHT
+TURN_LEFT TURN_RIGHT ATTACK` in that order, enable `labels_buffer_enabled = true`,
+and set `available_game_variables = { AMMO2 KILLCOUNT POSITION_X POSITION_Y }`.
+The bundled config alone has only three actions and does not enable labels.
+A config reconstructed this way is a starting point; use the original SNN config
+when reproducing its historical score. Runtime paths are resolved from the source location, so commands can be
 launched from the repository root, `src`, or an IDE.
 
 ## Training
@@ -106,6 +115,44 @@ python src/train.py --model snn --episodes 400 \
 The optimizer, episode number, global step, configuration, and best evaluation
 score are restored. Replay memory is intentionally rebuilt and must pass the
 warm-up threshold again.
+
+## Conventional CNN experiment
+
+`--model cnn` selects a separate dueling CNN with 32/64/64 convolution channels
+and two 512-unit heads for state value and action advantage. It consumes the same
+normalized `1 x 84 x 84` images and returns one Q-value per action. It reuses replay,
+reward shaping, balanced evaluation, checkpoint selection, diagnostics, and integer
+export. CNN artifacts are stored under `models/cnn`, `runs/cnn`, and `reports/cnn`.
+The existing `ffnn` remains the smaller conventional CNN baseline.
+
+The SNN already uses convolutional image features. A conventional CNN is therefore
+not guaranteed to improve success simply because observations are images. This
+new architecture needs training and held-out evaluation before claiming a gain.
+It has more parameters than FFNN and uses no internal spiking simulation steps.
+
+Train a fresh CNN using the balanced training recipe (do not resume an SNN checkpoint):
+
+```powershell
+python src/train.py --model cnn --episodes 1000 --seed 0 --run-id cnn-balanced-seed0 --eps-start 1.0 --eps-end 0.1 --eps-decay 10000 --eval-interval 25 --eval-episodes 3 --eval-seeds 0 1 2 3 4 --balanced-training --balanced-evaluation --max-spawn-attempts 1000 --easy-target-offset 0.1 --aim-progress-weight 20 --off-target-attack-penalty 4 --device auto
+```
+
+Evaluate its selected checkpoint on held-out hard spawns:
+
+```powershell
+python src/diagnose.py --model cnn --checkpoint models/cnn/cnn-balanced-seed0/best.pth --episodes 20 --seeds 10 11 12 13 14 --spawn-filter hard --easy-target-offset 0.1 --max-spawn-attempts 1000 --device auto
+```
+
+Run the same diagnostic command with `--model snn` and the SNN checkpoint. Compare
+hard-spawn success, left/right success, overall success, and reward using identical
+scenario files, seeds, episode counts, and filters. Also evaluate `--spawn-filter left`
+and `--spawn-filter right` separately for equal directional sample counts.
+Repeat training with multiple seeds for a reliable architecture comparison; the
+SNN's prior fine-tuning budget also matters. Do not tune on the held-out seeds.
+
+```powershell
+python src/compare_reports.py reports/snn/<baseline>/report.json reports/cnn/<candidate>/report.json --baseline-label SNN --candidate-label CNN --output reports/cnn-vs-snn.png
+python src/export_quantized.py --model cnn --checkpoint models/cnn/cnn-balanced-seed0/best.pth --bits 8 --output exports/cnn-int8.pt
+```
 
 ## Evaluation
 
