@@ -3,12 +3,16 @@
 from .ffnn import FeedForwardQNetwork
 from .rsnn import RSNNQNetwork
 from .snn import SpikingQNetwork
+from .compact_snn import CompactSpikingQNetwork
+from .compact_conv_snn import CompactConvSpikingQNetwork
 
 
 MODEL_CLASSES = {
     "ffnn": FeedForwardQNetwork,
     "rsnn": RSNNQNetwork,
     "snn": SpikingQNetwork,
+    "compact_snn": CompactSpikingQNetwork,
+    "compact_conv_snn": CompactConvSpikingQNetwork,
 }
 MODEL_NAMES = tuple(MODEL_CLASSES)
 
@@ -27,6 +31,8 @@ def build_model(model_name: str, action_size: int = 3, **kwargs):
 
 
 __all__ = [
+    "CompactSpikingQNetwork",
+    "CompactConvSpikingQNetwork",
     "FeedForwardQNetwork",
     "MODEL_CLASSES",
     "MODEL_NAMES",

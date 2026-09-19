@@ -3,6 +3,7 @@ __pycache__/
 *$py.class
 _vizdoom.ini
 *.cfg
+!/scenarios/corridor.cfg
 *.wad
 /runs/
 /models/
@@ -10,3 +11,4 @@ _vizdoom.ini
 /src/models/
 /reports/
 PROJECT_DESCRIPTION.md
+/scenarios/generated/

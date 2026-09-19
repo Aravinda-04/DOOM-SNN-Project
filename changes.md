@@ -223,3 +223,79 @@ is `c698ec68e5d818a666037a2524f639712ed768bb8e5c82f997a815874a3eff94`.
   validate fixed-point neuron dynamics or the PeraMorphIQ hardware runtime.
 
 Run `--help` on any command for its complete options.
+
+## Navigation learning correction (2026-09-19)
+
+- The 200-episode navigation run was unstable: best at episode 150 was 3/8
+  validation completions, all left turns; episode 200 was 0/8. Best policy
+  issued 1,478 attack actions over eight monster-free validation episodes.
+- Navigation training now allows only five movement/turn actions across random
+  exploration, greedy selection, Bellman targets and environment transitions.
+  Combat still has seven outputs/actions so navigation weights can be reused.
+  New checkpoints record the stage action set; old navigation checkpoints retain
+  their historical action semantics when loaded for evaluation.
+- Reward now includes an explicit timeout penalty and a sustained lack-of-progress
+  penalty. Progress shaping is stronger and DQN reward scaling is 25 instead of
+  100. Task and shaping components are logged separately; evaluation reports
+  per-turn completion, maximum progress and action counts.
+- Added optional `compact_conv_snn` for later controlled comparison with the
+  pooled compact model, plus weight/state/operation profiling. Training must
+  use a fresh run ID because reward semantics changed.
+- A 25-episode pure-RL probe still validated at 0/8: 2,736 turns, 32 forward
+  actions and average maximum route progress 2.18%. Attack actions were zero,
+  proving the stage mask works but exposing poor forward learning.
+- Added optional scripted navigation demonstrations for training-only imitation
+  and replay prefill. A bootstrap checkpoint and validation plot are saved
+  before DQN training; a lower initial exploration rate can preserve the learned
+  route while fine-tuning. No privileged position enters the policy input.
+
+### Direction-balance follow-up (2026-09-20)
+
+- Corridor checkpoint selection now ranks the weaker left/right completion rate
+  first, then overall completion and mean task reward. TensorBoard logs this
+  worst-direction metric; a regression test covers the ranking.
+- A pooled SNN with 16 demonstrations and 300 supervised updates completed 4/8
+  held-out cases, all left. The convolutional probe also completed only the
+  left cases. A two-episode warm-start probe flipped to 4/8 right and 0/4 left.
+- Increasing imitation to 1000 updates yielded 0/8 at bootstrap and after one
+  RL episode, with the policy orbiting the first corridor. More updates alone are therefore not a
+  demonstrated fix. These are short probes, not final benchmark estimates.
+- Saved visual comparisons under `reports/corridor/`; see `CORRIDOR.md` for
+  exact artifacts and the revised navigation gate. All 34 tests pass.
+
+## Corridor software milestone (2026-09-19)
+
+### Configuration consistency follow-up
+
+- Moved corridor engine defaults into tracked `scenarios/corridor.cfg`: scenario
+  path, initial map, buttons, variables, rendering, difficulty and episode timing.
+- CorridorEnvironment now loads that file and validates action-button order,
+  required game variables and grayscale format before starting ViZDoom.
+- Removed the implicit CLI timeout override so the configuration timeout applies
+  unless `--timeout` is supplied. Seeds, stage maps and diagnostic options remain
+  runtime choices. Existing seven-action corridor checkpoints remain compatible.
+- Added real-engine tests for working-directory independence, changed config
+  timeouts, explicit timeout overrides and rejection of reordered buttons.
+- Verification: 27 tests passed; recorded scripted traversal completed both
+  mirrored routes in 52 decisions each. Dashboard visually inspected; artifacts
+  saved under `reports/corridor/cfg-refactor-check/`. No retraining was needed.
+
+- Added an independent generated UDMF corridor environment with mirrored turns,
+  navigation/combat stages, seven actions, task-specific completion criteria,
+  and separate training/evaluation cases. Generated maps and per-instance engine
+  configuration are isolated from the existing basic scenario.
+- Added `src/corridor.py` for training, curriculum weight warm starts, checkpoint
+  validation, scripted environment smoke tests and visual evaluation. Checkpoints
+  are kept under `models/corridor/`; old five-action policies are rejected.
+- Evaluation saves a gameplay/input/Q-value/spike dashboard video, trajectory and
+  outcome plots, and JSON metrics. Training validation also saves plots and JSON.
+  Progress shaping uses privileged coordinates only during training, never as
+  policy inputs or reported evaluation reward.
+- Added `compact_snn` and `src/profile_models.py` for experimental compression and
+  resource comparisons. The seven-action compact network has 33,664 weights and
+  135 LIF state values; hardware equivalence and gameplay reliability are unverified.
+- Added `CORRIDOR.md` with Windows CMD commands, scope, limitations and results.
+- Verified 24 tests, all 32 maps in ViZDoom, 8/8 scripted traversal cases, short
+  navigation and combat training, checkpoint reload, video decoding and visual QA.
+  The two-episode combat smoke policy completed 0/2 full-timeout evaluations
+  (one death, one timeout). No long training run or FPGA deployment was performed.

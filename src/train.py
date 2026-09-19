@@ -153,6 +153,10 @@ def optimize_model(
     gamma: float,
     sparsity_weight: float,
     device: torch.device,
+    allowed_actions: tuple[int, ...] | None = None,
+    expert_states: torch.Tensor | None = None,
+    expert_actions: torch.Tensor | None = None,
+    expert_weight: float = 0.0,
 ) -> float | None:
     if len(memory) < max(batch_size, replay_start_size):
         return None
@@ -171,12 +175,36 @@ def optimize_model(
 
     with torch.no_grad():
         next_q_values, _ = target_net(next_state_batch)
-        next_state_values = next_q_values.max(1).values
+        next_state_values = (
+            next_q_values.index_select(
+                1, torch.as_tensor(allowed_actions, dtype=torch.long, device=device)
+            ).max(1).values
+            if allowed_actions is not None
+            else next_q_values.max(1).values
+        )
 
     expected_values = reward_batch + gamma * next_state_values * (1 - done_batch)
     td_loss = criterion(state_action_values, expected_values)
     sparsity_loss = spike_count / batch_size * sparsity_weight
     loss = td_loss + sparsity_loss
+    if expert_weight > 0:
+        if expert_states is None or expert_actions is None:
+            raise ValueError('Expert states and actions are required for an expert loss')
+        expert_q, _ = policy_net(expert_states)
+        permitted = (tuple(allowed_actions) if allowed_actions is not None
+                     else tuple(range(expert_q.shape[1])))
+        action_columns = torch.as_tensor(permitted, dtype=torch.long, device=device)
+        expert_columns = torch.full((expert_q.shape[1],), -1, dtype=torch.long,
+                                    device=device)
+        expert_columns[action_columns] = torch.arange(len(permitted), device=device)
+        targets = expert_columns[expert_actions]
+        if (targets < 0).any():
+            raise ValueError('Expert labels include an unavailable action')
+        expert_loss = nn.functional.cross_entropy(
+            expert_q.index_select(1, action_columns) / getattr(policy_net, 'num_steps', 1),
+            targets,
+        )
+        loss = loss + expert_weight * expert_loss
 
     optimizer.zero_grad()
     loss.backward()
