@@ -222,11 +222,11 @@ directories because paths depended on the terminal working directory. They are
 left untouched to prevent accidental loss. New code only reads and writes the
 root-level structured layout shown above.
 
-See `changes.md` for the complete migration notes.
+See `docs/changes.md` for the complete migration notes.
 
 ## Corridor experiment
 
-See [CORRIDOR.md](CORRIDOR.md) for the separate navigation/combat curriculum,
+See [docs/CORRIDOR.md](docs/CORRIDOR.md) for the separate navigation/combat curriculum,
 generated maps, compact SNN, resource charts, and visual evaluation commands.
 Start with `python src/corridor.py smoke --episodes 8 --render` to verify both
 turn directions with an explicitly labelled scripted environment test.
