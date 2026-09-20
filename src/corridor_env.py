@@ -5,6 +5,7 @@ in combat). This is an environment-defined exit region, not a Doom exit switch.
 """
 from __future__ import annotations
 
+import math
 import random
 import struct
 import uuid
@@ -228,7 +229,22 @@ class CorridorEnvironment:
         }
         reward = sum(reward_components.values())
         terminal_potential = 0 if self.done else self.potential(after)
-        after['shaping'] = 20 * (0.99 * terminal_potential - self.potential(before))
+        
+        def get_delta(info):
+            target = (640, 0) if info['x'] < 590 else (640, 690)
+            dy = self.mirror * (target[1] - info['y_progress'])
+            angle = math.degrees(math.atan2(dy, target[0] - info['x'])) % 360
+            return (angle - info['angle'] + 180) % 360 - 180
+
+        delta_before = get_delta(before)
+        delta_after = get_delta(after)
+        
+        align_potential_before = (180.0 - abs(delta_before)) / 180.0
+        align_potential_after = 0 if self.done else (180.0 - abs(delta_after)) / 180.0
+        alignment_shaping = 5.0 * (0.99 * align_potential_after - align_potential_before)
+        
+        after['shaping'] = 20 * (0.99 * terminal_potential - self.potential(before)) + alignment_shaping
+        after['alignment_shaping'] = alignment_shaping
         after['reward_components'] = reward_components
         after['progress'] = progress
         after['best_progress'] = self.best_progress

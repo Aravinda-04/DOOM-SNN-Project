@@ -178,7 +178,7 @@ def evaluate(model, device, *, stage, episodes, seed, output=None, render=False,
                 latencies, actions, trajectory = [], [], []
                 first_bend = None
                 reward_totals = {name: 0.0 for name in
-                                 ('living', 'kill', 'completion', 'death', 'timeout', 'no_progress')}
+                                 ('living', 'kill', 'completion', 'death', 'timeout', 'no_progress', 'alignment')}
                 max_progress = 0.0
                 info = env.info()
                 while not done:
@@ -235,6 +235,7 @@ def evaluate(model, device, *, stage, episodes, seed, output=None, render=False,
                     max_progress = max(max_progress, info['best_progress'])
                     for name, component in info['reward_components'].items():
                         reward_totals[name] += component
+                    reward_totals['alignment'] += info.get('alignment_shaping', 0.0)
                     actions.append(action)
                     trajectory.append([info['x'], env.mirror*info['y_progress']])
                 if writer is not None:
@@ -548,7 +549,7 @@ def train(args, device):
                 observation = env.reset(case=episode%8)
                 done, total, losses = False, 0.0, []
                 reward_totals = {name: 0.0 for name in
-                                 ('living', 'kill', 'completion', 'death', 'timeout', 'no_progress', 'shaping')}
+                                 ('living', 'kill', 'completion', 'death', 'timeout', 'no_progress', 'shaping', 'alignment')}
                 while not done:
                     epsilon = .1 + (args.epsilon_start - .1)*math.exp(-global_step/args.eps_decay)
                     if rng.random()<epsilon:
@@ -562,6 +563,7 @@ def train(args, device):
                     for name, component in info['reward_components'].items():
                         reward_totals[name] += component
                     reward_totals['shaping'] += info['shaping']
+                    reward_totals['alignment'] += info.get('alignment_shaping', 0.0)
                     observation = next_state
                     total += reward
                     global_step += 1
