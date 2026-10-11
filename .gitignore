@@ -4,12 +4,16 @@ __pycache__/
 _vizdoom.ini
 *.cfg
 !/scenarios/corridor.cfg
+!/scenarios/level01.cfg
 *.wad
 /runs/
 /models/
 /src/runs/
 /src/models/
 /reports/
+/data/demonstrations/
+/exports/
 PROJECT_DESCRIPTION.md
 /scenarios/generated/
 .obsidian/
+/Recordings

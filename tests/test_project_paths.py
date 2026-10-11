@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from project_paths import (
-    DEFAULT_CONFIG_PATH,
+    LEVEL_CONFIG_PATH,
     MODEL_ROOT,
     PROJECT_ROOT,
     RUN_ROOT,
@@ -16,8 +16,8 @@ def test_paths_do_not_depend_on_working_directory(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
 
     assert PROJECT_ROOT.is_absolute()
-    assert DEFAULT_CONFIG_PATH == PROJECT_ROOT / "basic.cfg"
-    assert DEFAULT_CONFIG_PATH.is_file()
+    assert LEVEL_CONFIG_PATH == PROJECT_ROOT / "scenarios" / "level01.cfg"
+    assert LEVEL_CONFIG_PATH.is_file()
     assert MODEL_ROOT == PROJECT_ROOT / "models"
     assert RUN_ROOT == PROJECT_ROOT / "runs"
 
@@ -33,4 +33,3 @@ def test_run_id_contains_timestamp_and_seed():
     run_id = make_run_id(42, datetime(2026, 9, 15, 23, 30, 1, 123456))
 
     assert run_id == "20260915-233001-123456-seed42"
-

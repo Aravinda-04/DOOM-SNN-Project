@@ -1,170 +1,266 @@
-# DOOM Spiking Neural Network Accelerator
+# Full-Level DOOM Recurrent SNN Agent
 
-This project trains neural networks to play the ViZDoom `basic` scenario. It
-compares a conventional feed-forward CNN (FFNN), a spiking CNN (SNN), and a
-recurrent spiking CNN (RSNN) before exporting integer weights for later FPGA
-integration.
+This project is building one recurrent spiking neural-network agent that can
+complete FreeDoom2 MAP01 autonomously through ViZDoom. The active pipeline uses
+four stacked grayscale frames, a fixed discrete action space, imitation
+pretraining, and recurrent DQN fine-tuning.
 
-## Project status
+The repository also contains checkpoints and reports from earlier combat,
+hard-spawn, corridor-navigation, conventional neural-network, and quantization
+experiments. Those artifacts are historical inputs; the active full-level
+pipeline is `train_level.py` and `diagnose_level.py`.
 
-Implemented:
+## Current status
 
-- ViZDoom environment with normalized `84 x 84` grayscale observations.
-- FFNN, SNN, and RSNN policies with a shared interface.
-- DQN training with experience replay and soft target updates.
-- Isolated experiment directories and TensorBoard logs.
-- Greedy multi-episode validation for best-checkpoint selection.
-- Resumable checkpoints and compatibility with legacy raw state dictionaries.
-- Symmetric per-tensor integer export with numerical error reporting.
+The core full-level environment, CRSNN, recurrent training mechanics, and
+checkpoint handling are stabilized. The active implementation phase is adding
+successful-play demonstration recording, CRSNN imitation pretraining,
+demonstration-guided RL fine-tuning, and a standalone autonomous-play command.
 
-Still required for hardware deployment:
+No completed full-level CRSNN benchmark has been established yet. Do not treat
+historical combat or corridor results as evidence that MAP01 is solved.
 
-- Map the integer interchange file to the PeraMorphIQ vendor format.
-- Validate supported layers, neuron dynamics, scales, and accumulator widths on
-  the target board.
-- Measure latency, power, and spike activity on hardware.
+See [AUTONOMOUS_SNN_IMPLEMENTATION_PLAN.md](AUTONOMOUS_SNN_IMPLEMENTATION_PLAN.md)
+for the active single-agent implementation plan. The older
+[FULL_LEVEL_PROJECT_PLAN.md](FULL_LEVEL_PROJECT_PLAN.md) is retained as
+stabilization history.
 
-## Installation
+## Active architecture
 
-Python 3.13 is the tested interpreter. Install the pinned dependencies:
+```text
+FreeDoom2 MAP01
+    -> ViZDoom
+    -> 4 x 84 x 84 grayscale observation
+    -> CRSNN
+    -> 9 Q-values
+    -> forward / backward / strafe / turn / attack / use / no-op
+```
+
+The recurrent hidden state is carried across game frames. During replay
+training, gradients remain connected within the sampled sequence and reset at
+the explicit sequence boundary.
+
+## Requirements
+
+- Python 3.13 is the currently tested interpreter.
+- `freedoom2.wad` must be present in the repository root.
+- The active scenario is `scenarios/level01.cfg`.
+
+Install the pinned dependencies:
 
 ```powershell
 python -m pip install -r requirements.txt
 ```
 
-The tracked `basic.cfg` and `basic.wad` files must remain in the repository
-root. Runtime paths are resolved from the source location, so commands can be
-launched from the repository root, `src`, or an IDE.
+## Validate before training
+
+Run the headless model/environment contract check:
+
+```powershell
+python src/train_level.py --model crsnn --device auto --validate-only
+```
+
+This initializes ViZDoom, resets MAP01, builds the requested model, and verifies
+the `(4, 84, 84)` observation and nine-action Q-value contract. It does not
+create a training run.
+
+## Validate manual completion and actions
+
+Before permanent demonstrations are collected, complete MAP01 once through the
+same observation, frame-skip, reward, and terminal pipeline used for training:
+
+```powershell
+python src/manual_level_validation.py
+```
+
+The game opens in ViZDoom spectator mode. Current local bindings use arrow keys
+for forward/backward/turning, comma and period for strafing, left control or
+mouse button 1 for attack, and space for use. Use only one configured action at
+a time during this validation run.
+
+The command creates a timestamped JSON report under
+`reports/manual-validation/`. A valid report requires a real MAP01 exit and no
+simultaneous unsupported button combinations. Exit code `0` means the action
+contract passed, `1` means the level was not completed, `2` means completion
+used unsupported inputs, and `3` means an engine error occurred.
+
+The frozen contract is defined in `src/agent_config.py`. Its hash is stored in
+new training configurations and validation reports so demonstrations and
+checkpoints cannot silently use a different output ordering.
+
+## Tests
+
+```powershell
+python -m pytest -q -p no:cacheprovider
+```
+
+The current suite contains 103 passing tests, including real-engine timeout,
+death, and headless spectator-path checks. A real successful exit remains the
+manual Phase 0 acceptance gate.
+
+## Record successful demonstrations
+
+Record human playthroughs for CRSNN imitation training with:
+
+```powershell
+python src/record_demonstrations.py `
+  --episodes 10 `
+  --discard-failures `
+  --notes "successful MAP01 routes"
+```
+
+`--episodes` is the number of attempted playthroughs. With
+`--discard-failures`, only completed episodes with fully supported, temporally
+stable action labels are retained. Rerun the command until the manifest has at
+least 10 successful episodes.
+
+The default dataset directory is `data/demonstrations/map01/`. Each episode is
+an independent compressed `.npz` containing aligned pre-action uint8 frame
+stacks, action indices, rewards, terminal flags, positions, and game times.
+`manifest.json` stores episode checksums and the frozen agent-contract hash.
+Datasets are ignored by Git because recordings can become large.
+
+## Imitation pretraining
+
+After at least two successful demonstrations exist, validate the complete
+dataset/model contract without creating a run:
+
+```powershell
+python src/train_imitation.py `
+  --dataset-dir data/demonstrations/map01 `
+  --device cuda `
+  --validate-only
+```
+
+At least 10 successful demonstrations are recommended before real training.
+The RTX 2050 starting configuration is:
+
+```powershell
+python src/train_imitation.py `
+  --dataset-dir data/demonstrations/map01 `
+  --run-id crsnn-map01-imitation `
+  --epochs 50 `
+  --batch-size 4 `
+  --sequence-length 16 `
+  --burn-in 4 `
+  --stride 16 `
+  --gradient-accumulation-steps 4 `
+  --closed-loop-interval 5 `
+  --closed-loop-episodes 1 `
+  --device cuda `
+  --amp
+```
+
+The trainer splits complete episodes rather than frames, applies no-gradient
+burn-in before each recurrent learning window, balances rare actions, and saves
+resumable `best.pth` and `latest.pth` checkpoints. Resume with the same data and
+hyperparameters while increasing `--epochs`:
+
+```powershell
+python src/train_imitation.py `
+  --dataset-dir data/demonstrations/map01 `
+  --run-id crsnn-map01-imitation `
+  --epochs 100 `
+  --batch-size 4 `
+  --sequence-length 16 `
+  --burn-in 4 `
+  --stride 16 `
+  --gradient-accumulation-steps 4 `
+  --closed-loop-interval 5 `
+  --closed-loop-episodes 1 `
+  --device cuda `
+  --amp `
+  --resume models/crsnn/crsnn-map01-imitation/latest.pth
+```
 
 ## Training
 
-Choose the architecture on the command line instead of editing source code:
+Start with a short mechanical run, not the full 2,000-episode target:
 
 ```powershell
-python src/train.py --model snn --episodes 200 --seed 0
-python src/train.py --model ffnn --episodes 200 --seed 1
-python src/train.py --model rsnn --episodes 200 --seed 2
+python src/train_level.py `
+  --model crsnn `
+  --run-id crsnn-map01-smoke-seed0 `
+  --episodes 5 `
+  --episode-timeout 140 `
+  --eval-interval 5 `
+  --eval-episodes 1 `
+  --eval-seeds 10 `
+  --seed 0 `
+  --device auto
 ```
 
-For an SNN run with turning, anti-loop reward shaping, and difficulty-aware
-multi-seed checkpoint selection, run this in Command Prompt:
-
-```cmd
-cd /d "E:\Side project"
-python src\train.py --model snn --episodes 100 --seed 0 --run-id snn-search-seed0 --eps-end 0.2 --eps-decay 5000 --eval-interval 10 --eval-episodes 2 --eval-seeds 0 1 2 --easy-target-offset 0.1 --device auto
-```
-
-For balanced hard-left/hard-right fine-tuning with training-only aiming reward
-shaping:
-
-```cmd
-python src\train.py --model snn --episodes 1000 --seed 0 --run-id snn-1000-balanced-seed0 --resume models\snn\deployment-candidates\snn-hardspawn-91pct.pth --eps-start 1.0 --eps-end 0.1 --eps-decay 10000 --eval-interval 25 --eval-episodes 3 --eval-seeds 0 1 2 3 4 --balanced-training --balanced-evaluation --max-spawn-attempts 1000 --easy-target-offset 0.1 --aim-progress-weight 20 --off-target-attack-penalty 4 --device auto
-```
-
-Balanced training alternates accepted hard-left and hard-right starts. Object
-labels reward turns that reduce target offset and penalize off-target attacks,
-but labels are never passed into the policy network. Balanced evaluation runs
-equal samples in both directions, and checkpoint selection maximizes the worse
-direction before considering aggregate success and reward.
-
-The replay reward receives a small penalty after eight identical consecutive
-actions and when a movement action makes no measurable progress. TensorBoard
-continues to show the unmodified game reward. ViZDoom object labels identify
-whether the monster starts near the center. Best-checkpoint selection first
-maximizes hard-spawn success, then total kill rate and mean reward.
-
-Useful options are available with:
+After smoke validation, a normal run can use:
 
 ```powershell
-python src/train.py --help
+python src/train_level.py `
+  --model crsnn `
+  --run-id crsnn-map01-seed0 `
+  --episodes 2000 `
+  --seed 0 `
+  --device auto
 ```
 
-Each experiment receives a unique run ID and writes to separate directories:
+The canonical model for the active objective is:
+
+| Model | Role | Trainable parameters |
+| --- | --- | ---: |
+| `crsnn` | Dense all-to-all recurrent spiking model | 1,903,736 |
+
+Other architectures remain in the repository as historical or inactive code;
+the current plan does not compare them. Run `python src/train_level.py --help`
+for the presently implemented RL hyperparameters.
+
+Replay capacity is measured in completed transitions, not episodes.
+Observations are stored as `uint8` and decoded when sampled. The default latest
+checkpoint interval is one episode.
+
+Each run writes isolated artifacts:
 
 ```text
-models/<model>/<run-id>/best.pth
-models/<model>/<run-id>/latest.pth
-models/<model>/<run-id>/config.json
+models/<model>/<run-id>/
+    config.json
+    latest.pth
+    best.pth
+
 runs/<model>/<run-id>/
+    TensorBoard event files
 ```
 
-`best.pth` is selected using greedy multi-seed hard-spawn success, total success,
-and then mean reward—not an exploratory training score. `latest.pth` is always
-the newest resumable state.
+`best.pth` is ranked by deterministic completion rate and then mean shaped
+reward. `latest.pth` is the resumable training state. Replay memory is rebuilt
+after resume.
 
-The current action space is `move_left`, `move_right`, `turn_left`,
-`turn_right`, and `attack`. Earlier three-action checkpoints require their
-matching scenario configuration and cannot be resumed into a five-action model.
-
-Resume a run by setting the final target episode count:
+Resume by setting the final target episode count:
 
 ```powershell
-python src/train.py --model snn --episodes 400 \
-  --resume models/snn/<run-id>/latest.pth
+python src/train_level.py `
+  --model crsnn `
+  --run-id crsnn-map01-seed0 `
+  --episodes 2500 `
+  --resume models/crsnn/crsnn-map01-seed0/latest.pth `
+  --device auto
 ```
 
-The optimizer, episode number, global step, configuration, and best evaluation
-score are restored. Replay memory is intentionally rebuilt and must pass the
-warm-up threshold again.
+## Diagnostics
 
-## Evaluation
-
-Evaluate the newest structured checkpoint, falling back to the legacy root
-checkpoint when necessary:
+Evaluate a checkpoint greedily without human control:
 
 ```powershell
-python src/eval.py --model snn
+python src/diagnose_level.py `
+  --model crsnn `
+  --checkpoint models/crsnn/crsnn-map01-seed0/best.pth `
+  --episodes 10 `
+  --seeds 0 `
+  --device auto
 ```
 
-Select a particular checkpoint or disable rendering:
+Reports are written beneath `reports/level/` and include JSON, CSV, TensorBoard
+metrics, and trajectory plots. They distinguish completion, death, timeout,
+raw game reward, shaped reward, kills, exploration, Q margins, and spike
+activity.
 
-```powershell
-python src/eval.py --model snn \
-  --checkpoint models/snn/<run-id>/best.pth --episodes 10 --no-render
-```
-
-The checkpoint is validated before ViZDoom opens a window.
-
-## SNN diagnostics
-
-Run a repeatable 100-episode baseline across five ViZDoom seeds from Windows
-Command Prompt:
-
-```cmd
-cd /d "E:\Side project"
-python src\diagnose.py --model snn --checkpoint models\snn\snn-100-seed0\best.pth --episodes 20 --seeds 0 1 2 3 4 --device auto
-```
-
-The command evaluates greedily without rendering and creates a timestamped
-folder under `reports/snn/`. Each report contains:
-
-- `report.json`: complete metadata, aggregate and per-seed summaries, action
-  traces, Q-value margins, and per-layer SNN spike activity.
-- `episodes.csv`: one flat row per episode for plotting or spreadsheet review.
-- `tensorboard/`: reward, success, episode length, stalled movement, Q-margin,
-  and spike-rate curves.
-
-Open the diagnostic graphs from Command Prompt with:
-
-```cmd
-tensorboard --logdir reports
-```
-
-The primary metric is hard-spawn success rate, followed by total success,
-median reward, and consistency across seeds. A high wall-loop count, a dominant attack
-fraction in failed episodes, repeated stalled movement, or a very small
-Q-margin indicates a brittle policy even when its mean reward looks good.
-
-To execute only genuinely hard spawns, use:
-
-```cmd
-python src\diagnose.py --model snn --checkpoint models\snn\<run-id>\best.pth --episodes 20 --seeds 10 11 12 13 14 --spawn-filter hard --easy-target-offset 0.1 --max-spawn-attempts 1000 --device auto
-```
-
-`--episodes` is the number of accepted episodes per seed. Easy resets are
-skipped and reported rather than counted. More specific filters are `left`,
-`right`, and `invisible`; `all` remains the default. The maximum-attempt limit
-prevents an impossible or rare filter from searching forever.
+Use `--render --delay 0.05` with a small episode count for visual inspection.
 
 ## TensorBoard
 
@@ -172,61 +268,18 @@ prevents an impossible or rare filter from searching forever.
 tensorboard --logdir runs
 ```
 
-Training and evaluation metrics are separated by architecture and run ID.
+Training logs include loss, epsilon, episode length, spike activity, replay
+episode count, and estimated replay observation memory.
 
-## Integer export
+## Important limitations
 
-Export real integer tensors and per-tensor scales, then measure the output error
-introduced by quantization:
-
-```powershell
-python src/export_quantized.py --model snn \
-  --checkpoint models/snn/<run-id>/best.pth \
-  --bits 8 --output exports/snn-int8.pt
-```
-
-The result is an integer interchange file, not a vendor-specific FPGA image.
-
-Evaluate the exported integer tensors end to end in ViZDoom after dequantized
-reconstruction:
-
-```cmd
-python src\diagnose.py --model snn --quantized-export exports\snn-balanced-hardspawn-99pct-int8.pt --episodes 20 --seeds 10 11 12 13 14 --spawn-filter hard --easy-target-offset 0.1 --max-spawn-attempts 1000 --device auto
-```
-
-Add `--render --delay 0.05` with fewer episodes for visual verification. Create
-a side-by-side report chart with `src/compare_reports.py`; run `--help` for its
-report paths and labels.
-
-## Architecture note
-
-The SNN and RSNN currently use deterministic direct coding: continuous pixels
-enter the first convolution and LIF neurons generate the first spikes. The RSNN
-recurrent state spans the internal neural simulation steps for one observation;
-it does not persist across game frames. A true cross-frame recurrent agent would
-require sequence replay and explicit hidden-state handling.
-
-## Tests
-
-```powershell
-python -m pytest
-```
-
-The test suite checks project-root paths, network construction and output
-contracts, legacy and structured checkpoints, and integer quantization.
-
-## Legacy artifacts
-
-Earlier runs created both root-level and `src/`-level `models` and `runs`
-directories because paths depended on the terminal working directory. They are
-left untouched to prevent accidental loss. New code only reads and writes the
-root-level structured layout shown above.
-
-See `docs/changes.md` for the complete migration notes.
-
-## Corridor experiment
-
-See [docs/CORRIDOR.md](docs/CORRIDOR.md) for the separate navigation/combat curriculum,
-generated maps, compact SNN, resource charts, and visual evaluation commands.
-Start with `python src/corridor.py smoke --episodes 8 --render` to verify both
-turn directions with an explicitly labelled scripted environment test.
+- Full MAP01 learning has not yet been demonstrated with the new CRSNN.
+- Position-based exploration rewards are training-only privileged signals;
+  coordinates are not policy inputs.
+- Historical INT8 results do not validate current full-level behavior or a
+  hardware runtime.
+- Deployment and hardware work are intentionally deferred; current work is
+  model-focused.
+- Demonstration recording and imitation-training code are implemented, but no
+  real successful dataset or trained MAP01 checkpoint exists yet. RL
+  demonstration fine-tuning and `play_level.py` remain.

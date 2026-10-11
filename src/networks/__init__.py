@@ -5,6 +5,11 @@ from .rsnn import RSNNQNetwork
 from .snn import SpikingQNetwork
 from .compact_snn import CompactSpikingQNetwork
 from .compact_conv_snn import CompactConvSpikingQNetwork
+from .drqn import DRQN
+from .crsnn import CRSNNQNetwork
+from .rsnn_v2 import RSNNv2QNetwork
+from .level_cnn import LevelCNNQNetwork
+from .level_drqn import LevelDRQNQNetwork
 
 
 MODEL_CLASSES = {
@@ -13,6 +18,12 @@ MODEL_CLASSES = {
     "snn": SpikingQNetwork,
     "compact_snn": CompactSpikingQNetwork,
     "compact_conv_snn": CompactConvSpikingQNetwork,
+    "drqn": DRQN,
+    # Full-level cross-frame recurrent models.
+    "crsnn": CRSNNQNetwork,
+    "rsnn_v2": RSNNv2QNetwork,
+    "level_cnn": LevelCNNQNetwork,
+    "level_drqn": LevelDRQNQNetwork,
 }
 MODEL_NAMES = tuple(MODEL_CLASSES)
 
@@ -33,10 +44,14 @@ def build_model(model_name: str, action_size: int = 3, **kwargs):
 __all__ = [
     "CompactSpikingQNetwork",
     "CompactConvSpikingQNetwork",
+    "CRSNNQNetwork",
     "FeedForwardQNetwork",
+    "LevelCNNQNetwork",
+    "LevelDRQNQNetwork",
     "MODEL_CLASSES",
     "MODEL_NAMES",
     "RSNNQNetwork",
+    "RSNNv2QNetwork",
     "SpikingQNetwork",
     "build_model",
 ]

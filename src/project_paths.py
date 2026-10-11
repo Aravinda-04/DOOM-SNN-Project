@@ -11,7 +11,7 @@ from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_CONFIG_PATH = PROJECT_ROOT / "basic.cfg"
+LEVEL_CONFIG_PATH = PROJECT_ROOT / "scenarios" / "level01.cfg"
 MODEL_ROOT = PROJECT_ROOT / "models"
 RUN_ROOT = PROJECT_ROOT / "runs"
 REPORT_ROOT = PROJECT_ROOT / "reports"
