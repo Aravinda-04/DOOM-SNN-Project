@@ -42,7 +42,7 @@ class CRSNNQNetwork(nn.Module):
     Parameters
     ----------
     action_size:
-        Number of discrete actions (9 for the current full-level contract).
+        Number of discrete actions (22 for the current full-level contract).
     num_steps:
         Internal LIF simulation steps per game frame (temporal depth).
     beta:
@@ -56,7 +56,7 @@ class CRSNNQNetwork(nn.Module):
 
     def __init__(
         self,
-        action_size: int = 9,
+        action_size: int = 22,
         num_steps: int = 10,
         beta: float = 0.9,
         in_channels: int = 4,

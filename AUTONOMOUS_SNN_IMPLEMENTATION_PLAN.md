@@ -92,26 +92,28 @@ Before collecting the permanent dataset, freeze one action catalogue and use
 it everywhere: environment, recorder, dataset metadata, imitation trainer, RL
 trainer, checkpoints, diagnostics, and autonomous play.
 
-The current catalogue contains eight single-button controls plus no-op:
+The frozen catalogue contains the eight atomic controls, no-op, and thirteen
+common combinations. Output indices are:
 
-1. Move forward.
-2. Move backward.
-3. Strafe left.
-4. Strafe right.
-5. Turn left.
-6. Turn right.
-7. Attack.
-8. Use/open.
-9. No-op, with no button pressed.
+| Indices | Actions |
+| --- | --- |
+| 0–8 | forward, backward, strafe left/right, turn left/right, attack, use, no-op |
+| 9–10 | forward + turn left/right |
+| 11–12 | forward + strafe left/right |
+| 13–18 | forward/backward/strafe left/strafe right/turn left/turn right + attack |
+| 19–20 | forward + turn left/right + attack |
+| 21 | forward + use |
 
-No-op is required because fixed-rate human demonstrations contain decisions in
-which no button is pressed. First perform one manual completion using only
-these actions. If MAP01 cannot
-be played comfortably without simultaneous inputs, extend the fixed catalogue
-once with a small number of essential combinations such as forward + turn and
-forward + attack. Do not change the catalogue after demonstrations or
-checkpoints are created. Store the ordered catalogue and a hash of it in every
-dataset and checkpoint.
+The exact ordering is defined only in `src/agent_config.py`; the grouped list
+above describes it without duplicating the source of truth. No-op is required
+because fixed-rate human demonstrations contain idle decisions. The common
+combinations let a human navigate and fight naturally. Per-tic input is
+resolved with a 75% majority across each four-tic model decision. Decisions
+that remain ambiguous or use an unlisted combination are stored with a false
+`label_valid` mask and ignored by the imitation loss. A completed episode is
+eligible when at least 95% of its decisions have valid labels. Store the
+ordered catalogue and its hash in every dataset and checkpoint, and do not
+change it after permanent demonstrations are collected.
 
 ## 6. Target pipeline
 
@@ -147,16 +149,17 @@ Implementation update (2026-10-11):
   diagnostics.
 - [x] Updated `DoomLevelEnvironment` with spectator mode that shares normal
   preprocessing, frame skipping, reward calculation, and terminal handling.
-- [x] Added `src/manual_level_validation.py` with JSON evidence reports and
-  strict unsupported-combination accounting.
-- [x] Passed a one-tic real-engine tool smoke test and the complete 89-test
-  suite. The smoke correctly reported `timed_out`, not completion.
+- [x] Added `src/manual_level_validation.py` with JSON evidence reports,
+  four-tic majority resolution, and ambiguous-decision coverage accounting.
+- [x] Expanded the contract once to 22 actions so normal forward-turn,
+  movement-attack, and forward-use inputs are directly representable.
+- [x] Passed real-engine validation and recording timeout smoke tests. They
+  correctly reported `timed_out`, not completion.
 - [ ] Complete MAP01 interactively with the tool and produce a valid report.
-- [ ] Based on that run, either confirm the eight atomic actions plus no-op or make the
-  one permitted pre-dataset catalogue revision.
+- [ ] Confirm the 22-action catalogue with a real successful playthrough.
 
-The provisional contract hash is
-`ccf6ef4360c7a20f945a6e1850f62cf38121bc4717aeed9566be7ef6d120978c`.
+The provisional contract hash for contract version 2 is
+`b9358f1506e0a4c62c3d54021276172692666cc220a1390ab201f858fa2147a3`.
 It is emitted by `python src/manual_level_validation.py` and stored in every
 validation report. It must not be declared final until the interactive
 completion gate passes.
@@ -195,9 +198,10 @@ Implementation update (2026-10-11):
 - [x] Added `src/demonstrations.py` with versioned schemas, atomic compressed
   episode writes, safe non-pickle loading, SHA-256 manifests, manifest
   verification, uint8 observation encoding, and whole-episode splitting.
-- [x] Samples every engine tic inside each four-tic model decision. A key
-  change within that window is stored as action `-1` and makes the episode
-  invalid instead of receiving a misleading expert label.
+- [x] Samples every engine tic inside each four-tic model decision. A 3/4
+  majority receives the corresponding catalogue label. A 2/2 tie, unsupported
+  combination, or unstable input is stored as action `-1` with
+  `label_valid=false` instead of receiving a misleading expert label.
 - [x] Added no-op as a real catalogue action so idle human decisions have a
   valid imitation label.
 - [x] Added failure retention and `--discard-failures`, notes, unique episode
@@ -205,7 +209,10 @@ Implementation update (2026-10-11):
 - [x] Passed an end-to-end one-tic real-engine recording smoke. The generated
   episode and manifest reloaded with valid checksums and correctly reported a
   timeout.
-- [x] Full automated suite: 97 tests passed.
+- [x] Upgraded demonstrations to schema version 2 with a per-step
+  `label_valid` mask and episode-level label-coverage metadata.
+- [x] Completed episodes remain eligible when at least 95% of decisions are
+  valid; masked decisions do not contribute to imitation loss or metrics.
 - [ ] Collect at least 10 successful, contract-valid MAP01 demonstrations.
 - [ ] Replay/inspect three full successful recordings for final alignment QA.
 
@@ -218,6 +225,7 @@ Per-step data:
 ```text
 observation     uint8 [4, 84, 84]
 action          integer action index
+label_valid     bool; false means the action label must be ignored
 reward          float32 shaped reward
 raw_reward      float32 game reward
 done            bool
@@ -236,6 +244,8 @@ preprocessing version
 terminal_reason
 completed
 episode_steps
+label_valid_fraction
+minimum_label_valid_fraction
 total_raw_reward
 total_shaped_reward
 final diagnostics
@@ -249,6 +259,8 @@ Storage rules:
 - Save observations as `uint8`, not float tensors.
 - Mark failed/death/timeout demonstrations; do not silently mix them with
   successful expert trajectories.
+- Retain ambiguous steps with `label_valid=false`; never invent a target for
+  them, and reject a successful episode if valid coverage is below 95%.
 - Never overwrite an existing episode file.
 - Provide `--discard-failures` and `--notes` options.
 
@@ -290,13 +302,16 @@ Implementation update (2026-10-11):
   validation metrics, closed-loop metrics, and strict resume compatibility.
 - [x] Synthetic tests prove episode separation, burn-in gradient isolation,
   finite gradients, action weighting, and tiny recurrent-sequence overfitting.
-- [x] Actual CRSNN CUDA/AMP validation produced a finite loss with nine model
-  outputs.
-- [x] Actual CRSNN CUDA/AMP train-save-resume smoke completed three epochs. The
-  smoke checkpoint is under
-  `models/crsnn/stabilization-imitation-smoke-20261011/`; it used synthetic
-  data and is not gameplay evidence.
-- [x] Full automated suite: 103 tests passed.
+- [x] Actual CRSNN CUDA/AMP validation produced a finite loss with 22 model
+  outputs using demonstration schema version 2 and masked-label handling.
+- [x] The contract-version-2 CUDA/AMP train-save-resume smoke completed two
+  epochs at
+  `models/crsnn/stabilization-imitation-combinations-smoke-20261011/`. Its
+  inputs are synthetic and it is not gameplay evidence.
+- [x] A prior nine-output CUDA/AMP train-save-resume smoke completed three
+  epochs, but its synthetic checkpoint predates contract version 2 and is now
+  intentionally incompatible. It is not gameplay evidence.
+- [x] Full automated suite: 121 tests passed.
 - [ ] Collect the real successful demonstration dataset.
 - [ ] Run the tiny-real-subset overfit gate and full imitation training.
 - [ ] Demonstrate repeatable closed-loop route progress from the trained
@@ -308,7 +323,8 @@ Training behavior:
 
 1. Sample complete recurrent windows from demonstration episodes.
 2. Reconstruct recurrent context with no-gradient burn-in.
-3. Apply cross-entropy loss to expert actions over the learning window.
+3. Apply cross-entropy loss only to `label_valid=true` expert actions over the
+   learning window.
 4. Add the existing normalized spike-rate penalty with a small coefficient.
 5. Use class weighting or balanced sampling so common forward actions do not
    eliminate rare use, turn, and attack actions.
@@ -582,7 +598,8 @@ The next coding agent should follow this order:
 2. [~] Validate a real manual MAP01 completion through the active environment;
    the tool is implemented and the interactive completion is pending.
 3. [~] Freeze and centralize the action catalogue and preprocessing metadata;
-   the nine-action catalogue is centralized and awaits manual confirmation.
+   the 22-action catalogue is implemented and awaits successful-play
+   confirmation.
 4. [x] Implement and test `record_demonstrations.py`.
 5. [ ] Collect and validate at least 10 successful demonstrations.
 6. [x] Implement the episode-based demonstration dataset loader.

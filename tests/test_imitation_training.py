@@ -36,6 +36,8 @@ def _add_episode(dataset_dir, episode_index: int, steps: int = 30) -> None:
         "completed": True,
         "terminal_reason": "completed",
         "valid_action_contract": True,
+        "label_valid_fraction": 1.0,
+        "minimum_label_valid_fraction": 0.95,
         "notes": "synthetic",
     }
     episode_path = dataset_dir / f"{episode_id}.npz"
@@ -43,6 +45,7 @@ def _add_episode(dataset_dir, episode_index: int, steps: int = 30) -> None:
         episode_path,
         observations=observations,
         actions=actions,
+        label_valid=np.ones(steps, dtype=np.bool_),
         rewards=np.zeros(steps, dtype=np.float32),
         raw_rewards=np.zeros(steps, dtype=np.float32),
         dones=dones,
@@ -73,6 +76,7 @@ def test_sequence_dataset_uses_whole_episode_split_and_expected_windows(tmp_path
     assert sample["observations"].shape == (10, 4, 84, 84)
     assert sample["observations"].dtype == torch.float32
     assert sample["actions"].shape == (10,)
+    assert sample["label_valid"].shape == (10,)
     assert 0.0 <= float(sample["observations"].min()) <= 1.0
     assert 0.0 <= float(sample["observations"].max()) <= 1.0
 

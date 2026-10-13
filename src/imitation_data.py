@@ -61,6 +61,8 @@ class DemonstrationSequenceDataset(Dataset):
             steps = int(entry["steps"])
             if steps < self.window_length:
                 continue
+            payload = load_episode(self.dataset_dir / entry["file"])
+            label_valid = payload["label_valid"]
             last_start = steps - self.window_length
             starts = list(range(0, last_start + 1, self.stride))
             if starts[-1] != last_start:
@@ -68,6 +70,11 @@ class DemonstrationSequenceDataset(Dataset):
             self.windows.extend(
                 (entry["file"], start, entry["episode_id"])
                 for start in starts
+                if np.any(
+                    label_valid[
+                        start + self.burn_in : start + self.window_length
+                    ]
+                )
             )
         if not self.windows:
             raise ValueError(
@@ -90,13 +97,14 @@ class DemonstrationSequenceDataset(Dataset):
             payload["observations"][start:stop].astype(np.float32) / 255.0
         )
         actions = payload["actions"][start:stop].astype(np.int64)
-        if np.any(actions < 0):
-            raise ValueError(
-                f"Eligible episode {episode_id} unexpectedly has invalid labels."
-            )
+        label_valid = payload["label_valid"][start:stop].astype(np.bool_)
+        # Cross-entropy still requires an in-range tensor at masked positions.
+        # These replacement values never contribute to the loss or metrics.
+        actions = np.where(label_valid, actions, 0)
         return {
             "observations": torch.from_numpy(observations),
             "actions": torch.from_numpy(actions),
+            "label_valid": torch.from_numpy(label_valid),
             "episode_id": episode_id,
             "start": start,
         }
@@ -107,11 +115,7 @@ def action_class_weights(dataset_dir: Path, entries: Sequence[dict]) -> torch.Te
     counts = np.zeros(AGENT_CONTRACT.action_size, dtype=np.int64)
     for entry in entries:
         payload = load_episode(dataset_dir / entry["file"])
-        actions = payload["actions"]
-        if np.any(actions < 0):
-            raise ValueError(
-                f"Episode {entry['episode_id']} has invalid action labels."
-            )
+        actions = payload["actions"][payload["label_valid"]]
         counts += np.bincount(actions, minlength=AGENT_CONTRACT.action_size)
     weights = np.zeros_like(counts, dtype=np.float32)
     present = counts > 0

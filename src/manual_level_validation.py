@@ -3,8 +3,9 @@
 ViZDoom runs in spectator mode: the human controls the visible game window,
 while observations, rewards, frame skipping, and terminal classification pass
 through the same ``DoomLevelEnvironment`` used by training. The resulting JSON
-report records whether every observed non-idle input was representable by the
-model's fixed discrete action catalogue.
+report records how much of the playthrough can be represented by the model's
+fixed discrete action catalogue. Brief transitions and uncommon combinations
+are masked instead of invalidating an otherwise useful successful run.
 
 Run from the project root:
 
@@ -30,7 +31,7 @@ from agent_config import (
     ACTION_NAMES,
     AGENT_CONTRACT,
     DEFAULT_FRAME_SKIP,
-    match_button_vector,
+    resolve_tic_actions,
 )
 from doom_level_env import DoomLevelEnvironment
 from project_paths import LEVEL_CONFIG_PATH, PROJECT_ROOT, REPORT_ROOT
@@ -64,20 +65,31 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="JSON report path (default: reports/manual-validation/<timestamp>.json).",
     )
+    parser.add_argument(
+        "--max-ambiguous-fraction",
+        type=float,
+        default=0.05,
+        help="Maximum masked key-transition decisions (default: 0.05).",
+    )
     return parser.parse_args()
 
 
 def run_validation(
-    *, seed: int, episode_timeout: Optional[int], output_path: Path
+    *,
+    seed: int,
+    episode_timeout: Optional[int],
+    output_path: Path,
+    max_ambiguous_fraction: float = 0.05,
 ) -> tuple[dict, int]:
     if episode_timeout is not None and episode_timeout <= 0:
         raise ValueError("--episode-timeout must be positive.")
     if output_path.exists():
         raise FileExistsError(f"Refusing to overwrite existing report: {output_path}")
+    if not 0.0 <= max_ambiguous_fraction < 0.5:
+        raise ValueError("max_ambiguous_fraction must be in [0, 0.5).")
 
     started_at = datetime.now(timezone.utc)
     action_counts = [0] * len(ACTION_NAMES)
-    idle_decisions = 0
     unsupported_counts: Counter[str] = Counter()
     total_shaped_reward = 0.0
     decisions = 0
@@ -87,7 +99,7 @@ def run_validation(
 
     print("Manual MAP01 action validation")
     print(f"Action contract: {ACTION_CATALOGUE_HASH}")
-    print("Use only one configured action at a time.")
+    print("Natural supported movement/combat key combinations are allowed.")
     print("Close the level by reaching its exit; Ctrl+C records an interruption.")
 
     env: Optional[DoomLevelEnvironment] = None
@@ -103,29 +115,20 @@ def run_validation(
         env.reset()
         done = False
         while not done:
-            _, reward, done, buttons = env.spectator_step()
+            _, reward, done, _ = env.spectator_step()
             total_shaped_reward += reward
             decisions += 1
 
             tic_actions = env.last_spectator_tic_actions
-            stable = all(action == tic_actions[0] for action in tic_actions)
-            classification, action_index = match_button_vector(buttons)
-            if not stable:
-                classification, action_index = "unsupported", None
-            if classification == "supported":
-                assert action_index is not None
+            action_index, is_valid, agreement = resolve_tic_actions(tic_actions)
+            if is_valid and action_index is not None:
                 action_counts[action_index] += 1
-            elif classification == "idle":
-                idle_decisions += 1
             else:
-                if stable:
-                    key = "".join("1" if bool(value) else "0" for value in buttons)
-                else:
-                    encoded = [
-                        "".join("1" if bool(value) else "0" for value in action)
-                        for action in tic_actions
-                    ]
-                    key = "tic_change:" + ">".join(encoded)
+                encoded = [
+                    "".join("1" if bool(value) else "0" for value in action)
+                    for action in tic_actions
+                ]
+                key = f"agreement={agreement:.2f}:" + ">".join(encoded)
                 unsupported_counts[key] += 1
 
             if decisions % 250 == 0:
@@ -154,7 +157,14 @@ def run_validation(
 
     completed = bool(final_info.get("exit_triggered", False))
     unsupported_total = sum(unsupported_counts.values())
-    contract_valid = completed and unsupported_total == 0 and not interrupted
+    label_valid_fraction = (
+        (decisions - unsupported_total) / decisions if decisions else 0.0
+    )
+    contract_valid = (
+        completed
+        and label_valid_fraction >= 1.0 - max_ambiguous_fraction
+        and not interrupted
+    )
     status = (
         "engine_error" if engine_error
         else "interrupted" if interrupted
@@ -163,7 +173,7 @@ def run_validation(
     )
 
     report = {
-        "schema_version": 1,
+        "schema_version": 2,
         "started_at": started_at.isoformat(),
         "finished_at": datetime.now(timezone.utc).isoformat(),
         "status": status,
@@ -183,8 +193,9 @@ def run_validation(
         },
         "decisions": decisions,
         "supported_action_counts": dict(zip(ACTION_NAMES, action_counts)),
-        "idle_decisions": idle_decisions,
         "unsupported_decisions": unsupported_total,
+        "label_valid_fraction": label_valid_fraction,
+        "minimum_label_valid_fraction": 1.0 - max_ambiguous_fraction,
         "unsupported_button_vectors": dict(unsupported_counts),
         "total_shaped_reward": total_shaped_reward,
         "final_diagnostics": final_info,
@@ -197,6 +208,7 @@ def run_validation(
     print(f"Completed       : {completed}")
     print(f"Contract valid  : {contract_valid}")
     print(f"Unsupported     : {unsupported_total}")
+    print(f"Label coverage  : {label_valid_fraction:.1%}")
     print(f"Report          : {output_path}")
 
     if engine_error:
@@ -218,6 +230,7 @@ def main() -> int:
         seed=args.seed,
         episode_timeout=args.episode_timeout,
         output_path=output_path.expanduser().resolve(),
+        max_ambiguous_fraction=args.max_ambiguous_fraction,
     )
     return exit_code
 

@@ -75,6 +75,7 @@ def imitation_sequence_loss(
     observations: torch.Tensor,
     actions: torch.Tensor,
     *,
+    label_valid: Optional[torch.Tensor] = None,
     burn_in: int,
     class_weights: Optional[torch.Tensor],
     sparsity_weight: float,
@@ -84,6 +85,10 @@ def imitation_sequence_loss(
         raise ValueError("observations must have shape (B, T, C, H, W).")
     if actions.shape != observations.shape[:2]:
         raise ValueError("actions must have shape (B, T).")
+    if label_valid is None:
+        label_valid = torch.ones_like(actions, dtype=torch.bool)
+    if label_valid.shape != actions.shape:
+        raise ValueError("label_valid must have shape (B, T).")
     if not 0 <= burn_in < observations.shape[1]:
         raise ValueError("burn_in must be smaller than the sequence window.")
 
@@ -96,17 +101,26 @@ def imitation_sequence_loss(
     cross_entropy = torch.zeros((), device=observations.device)
     total_spikes = torch.zeros((), device=observations.device)
     correct = torch.zeros((), device=observations.device)
+    valid_examples = torch.zeros((), device=observations.device)
     learning_steps = observations.shape[1] - burn_in
     for time_index in range(burn_in, observations.shape[1]):
         logits, spikes, hidden = model(observations[:, time_index], hidden)
         targets = actions[:, time_index]
-        cross_entropy = cross_entropy + F.cross_entropy(
-            logits, targets, weight=class_weights
-        )
+        mask = label_valid[:, time_index].bool()
+        if mask.any():
+            per_example_loss = F.cross_entropy(
+                logits, targets, weight=class_weights, reduction="none"
+            )
+            cross_entropy = cross_entropy + per_example_loss[mask].sum()
+            correct = correct + (
+                logits.argmax(dim=1)[mask] == targets[mask]
+            ).sum()
+            valid_examples = valid_examples + mask.sum()
         total_spikes = total_spikes + spikes
-        correct = correct + (logits.argmax(dim=1) == targets).sum()
 
-    cross_entropy = cross_entropy / learning_steps
+    if valid_examples.item() == 0:
+        raise ValueError("Sequence batch contains no valid learning labels.")
+    cross_entropy = cross_entropy / valid_examples
     opportunities = getattr(model, "spike_opportunities_per_sample", None)
     if opportunities is None:
         spike_rate = torch.zeros((), device=observations.device)
@@ -121,10 +135,7 @@ def imitation_sequence_loss(
         "cross_entropy": cross_entropy.detach(),
         "spike_rate": spike_rate.detach(),
         "correct": correct.detach(),
-        "examples": torch.tensor(
-            observations.shape[0] * learning_steps,
-            device=observations.device,
-        ),
+        "examples": valid_examples.detach(),
     }
     return total_loss, metrics
 
@@ -150,12 +161,17 @@ def evaluate_demonstrations(
                 payload = load_episode(dataset_dir / entry["file"])
                 observations = payload["observations"]
                 actions = payload["actions"]
+                label_valid = payload["label_valid"]
                 hidden: Optional[tuple] = None
-                for observation, target in zip(observations, actions):
+                for observation, target, is_valid in zip(
+                    observations, actions, label_valid
+                ):
                     tensor = torch.from_numpy(
                         observation.astype(np.float32) / 255.0
                     ).unsqueeze(0).to(device)
                     logits, spikes, hidden = model(tensor, hidden)
+                    if not is_valid:
+                        continue
                     target_tensor = torch.tensor([int(target)], device=device)
                     total_loss += float(
                         F.cross_entropy(logits, target_tensor).item()
@@ -353,6 +369,7 @@ def main() -> None:
         batch = next(iter(train_loader))
         observations = batch["observations"].to(device)
         actions = batch["actions"].to(device)
+        label_valid = batch["label_valid"].to(device)
         with torch.autocast(
             device_type=device.type,
             dtype=torch.float16,
@@ -362,6 +379,7 @@ def main() -> None:
                 model,
                 observations,
                 actions,
+                label_valid=label_valid,
                 burn_in=args.burn_in,
                 class_weights=class_weights,
                 sparsity_weight=args.sparsity_weight,
@@ -500,6 +518,9 @@ def main() -> None:
                 actions = batch["actions"].to(
                     device, non_blocking=device.type == "cuda"
                 )
+                label_valid = batch["label_valid"].to(
+                    device, non_blocking=device.type == "cuda"
+                )
                 with torch.autocast(
                     device_type=device.type,
                     dtype=torch.float16,
@@ -509,6 +530,7 @@ def main() -> None:
                         model,
                         observations,
                         actions,
+                        label_valid=label_valid,
                         burn_in=args.burn_in,
                         class_weights=class_weights,
                         sparsity_weight=args.sparsity_weight,

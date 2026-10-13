@@ -11,12 +11,13 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import asdict, dataclass
-from typing import Iterable, Optional
+from collections import Counter
+from typing import Iterable, Optional, Sequence
 
 
 MODEL_NAME = "crsnn"
 MAP_NAME = "map01"
-CONTRACT_VERSION = 1
+CONTRACT_VERSION = 2
 PREPROCESSING_VERSION = 1
 
 FRAME_STACK = 4
@@ -36,25 +37,48 @@ BUTTON_NAMES = (
     "USE",
 )
 
-ACTION_NAMES = (
-    "forward",
-    "backward",
-    "strafe_left",
-    "strafe_right",
-    "turn_left",
-    "turn_right",
-    "attack",
-    "use",
-    "noop",
-)
+def _action(*pressed: str) -> tuple[bool, ...]:
+    unknown = sorted(set(pressed) - set(BUTTON_NAMES))
+    if unknown:
+        raise ValueError(f"Unknown action buttons: {unknown}")
+    return tuple(name in pressed for name in BUTTON_NAMES)
 
-# Atomic actions are intentionally frozen for Phase 0 validation. If a manual
-# MAP01 completion proves combinations are essential, replace this catalogue
-# once before collecting permanent demonstrations or training checkpoints.
-ACTIONS = tuple(
-    tuple(button_index == action_index for button_index in range(len(BUTTON_NAMES)))
-    for action_index in range(len(BUTTON_NAMES))
-) + (tuple(False for _ in BUTTON_NAMES),)
+
+# Keep the original atomic action indices stable, append no-op, then append the
+# combinations people naturally use while navigating and fighting. Less common
+# combinations remain recordable as ambiguous/masked decisions.
+ACTION_DEFINITIONS = (
+    ("forward", _action("MOVE_FORWARD")),
+    ("backward", _action("MOVE_BACKWARD")),
+    ("strafe_left", _action("MOVE_LEFT")),
+    ("strafe_right", _action("MOVE_RIGHT")),
+    ("turn_left", _action("TURN_LEFT")),
+    ("turn_right", _action("TURN_RIGHT")),
+    ("attack", _action("ATTACK")),
+    ("use", _action("USE")),
+    ("noop", _action()),
+    ("forward_turn_left", _action("MOVE_FORWARD", "TURN_LEFT")),
+    ("forward_turn_right", _action("MOVE_FORWARD", "TURN_RIGHT")),
+    ("forward_strafe_left", _action("MOVE_FORWARD", "MOVE_LEFT")),
+    ("forward_strafe_right", _action("MOVE_FORWARD", "MOVE_RIGHT")),
+    ("forward_attack", _action("MOVE_FORWARD", "ATTACK")),
+    ("backward_attack", _action("MOVE_BACKWARD", "ATTACK")),
+    ("strafe_left_attack", _action("MOVE_LEFT", "ATTACK")),
+    ("strafe_right_attack", _action("MOVE_RIGHT", "ATTACK")),
+    ("turn_left_attack", _action("TURN_LEFT", "ATTACK")),
+    ("turn_right_attack", _action("TURN_RIGHT", "ATTACK")),
+    (
+        "forward_turn_left_attack",
+        _action("MOVE_FORWARD", "TURN_LEFT", "ATTACK"),
+    ),
+    (
+        "forward_turn_right_attack",
+        _action("MOVE_FORWARD", "TURN_RIGHT", "ATTACK"),
+    ),
+    ("forward_use", _action("MOVE_FORWARD", "USE")),
+)
+ACTION_NAMES = tuple(name for name, _ in ACTION_DEFINITIONS)
+ACTIONS = tuple(action for _, action in ACTION_DEFINITIONS)
 
 
 @dataclass(frozen=True)
@@ -124,11 +148,13 @@ def validate_agent_contract(contract: AgentContract = AGENT_CONTRACT) -> None:
     for name, action in zip(contract.action_names, contract.actions):
         if len(action) != len(contract.button_names):
             raise ValueError("Every action must define every configured button.")
-        expected_pressed = 0 if name == "noop" else 1
-        if sum(action) != expected_pressed:
+        pressed = sum(action)
+        if name == "noop" and pressed != 0:
             raise ValueError(
-                f"Action '{name}' must press exactly {expected_pressed} buttons."
+                "The noop action cannot press any buttons."
             )
+        if name != "noop" and pressed == 0:
+            raise ValueError(f"Action '{name}' must press at least one button.")
 
 
 def match_button_vector(
@@ -136,9 +162,8 @@ def match_button_vector(
 ) -> tuple[str, Optional[int]]:
     """Classify a spectator button vector against the frozen catalogue.
 
-    Returns ``("supported", index)`` for an exact catalogue action,
-    ``("idle", None)`` when no configured button is active, and
-    ``("unsupported", None)`` for simultaneous or otherwise unknown inputs.
+    Returns ``("supported", index)`` for an exact catalogue action (including
+    no-op) and ``("unsupported", None)`` for any other combination.
     """
     vector = tuple(bool(value) for value in values)
     if len(vector) != len(BUTTON_NAMES):
@@ -151,6 +176,35 @@ def match_button_vector(
         if not any(vector):
             return "idle", None
         return "unsupported", None
+
+
+def resolve_tic_actions(
+    tic_actions: Sequence[Iterable[float | bool]],
+    *,
+    minimum_agreement: float = 0.75,
+) -> tuple[Optional[int], bool, float]:
+    """Resolve raw per-tic input to one catalogue label plus a validity mask.
+
+    A decision is valid when one supported catalogue action occupies at least
+    ``minimum_agreement`` of its engine tics. This tolerates a one-tic keyboard
+    transition in the normal four-tic decision window while masking 2/2 ties,
+    rapidly changing input, and unsupported combinations.
+    """
+    if not 0.5 < minimum_agreement <= 1.0:
+        raise ValueError("minimum_agreement must be in (0.5, 1.0].")
+    if not tic_actions:
+        raise ValueError("At least one tic action is required.")
+    matched: list[int] = []
+    for values in tic_actions:
+        status, index = match_button_vector(values)
+        if status == "supported" and index is not None:
+            matched.append(index)
+    if not matched:
+        return None, False, 0.0
+    counts = Counter(matched)
+    action_index, count = counts.most_common(1)[0]
+    agreement = count / len(tic_actions)
+    return action_index, agreement >= minimum_agreement, agreement
 
 
 validate_agent_contract()

@@ -25,7 +25,7 @@ from agent_config import (
     ACTION_NAMES,
     AGENT_CONTRACT,
     DEFAULT_FRAME_SKIP,
-    match_button_vector,
+    resolve_tic_actions,
 )
 from demonstrations import (
     DEMONSTRATION_SCHEMA_VERSION,
@@ -61,13 +61,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--discard-failures",
         action="store_true",
-        help="Do not save deaths, timeouts, interruptions, or invalid-action runs.",
+        help=(
+            "Do not save deaths, timeouts, interruptions, or runs below the "
+            "required valid-label coverage."
+        ),
     )
     parser.add_argument(
         "--episode-timeout",
         type=int,
         default=None,
         help="Optional timeout override in tics; omit when collecting real data.",
+    )
+    parser.add_argument(
+        "--max-ambiguous-fraction",
+        type=float,
+        default=0.05,
+        help=(
+            "Maximum masked decisions in an accepted episode (default: 0.05)."
+        ),
     )
     return parser.parse_args()
 
@@ -82,9 +93,11 @@ def _record_one_episode(
     episode_id: str,
     seed: int,
     notes: str,
+    minimum_label_valid_fraction: float,
 ) -> tuple[dict, dict[str, np.ndarray]]:
     observations: list[np.ndarray] = []
     actions: list[int] = []
+    label_valid: list[bool] = []
     rewards: list[float] = []
     raw_rewards: list[float] = []
     dones: list[bool] = []
@@ -99,7 +112,7 @@ def _record_one_episode(
     done = False
     while not done:
         try:
-            next_observation, reward, done, buttons = env.spectator_step()
+            next_observation, reward, done, _ = env.spectator_step()
         except KeyboardInterrupt:
             interrupted = True
             break
@@ -111,28 +124,20 @@ def _record_one_episode(
             _normalized_tic_action(action)
             for action in env.last_spectator_tic_actions
         )
-        stable = bool(tic_actions) and all(
-            action == tic_actions[0] for action in tic_actions
-        )
-        classification, action_index = match_button_vector(buttons)
-        if not stable:
-            classification, action_index = "unsupported", None
-
-        if classification != "supported" or action_index is None:
+        action_index, is_valid, agreement = resolve_tic_actions(tic_actions)
+        if action_index is None or not is_valid:
             action_index = -1
-            if stable:
-                key = "".join("1" if value else "0" for value in tic_actions[0])
-            else:
-                encoded = [
-                    "".join("1" if value else "0" for value in action)
-                    for action in tic_actions
-                ]
-                key = "tic_change:" + ">".join(encoded)
+            encoded = [
+                "".join("1" if value else "0" for value in action)
+                for action in tic_actions
+            ]
+            key = f"agreement={agreement:.2f}:" + ">".join(encoded)
             unsupported[key] += 1
 
         info = env.diagnostics()
         observations.append(observation_to_uint8(observation))
         actions.append(action_index)
+        label_valid.append(is_valid)
         rewards.append(float(reward))
         raw_rewards.append(float(info.get("last_raw_reward", 0.0)))
         dones.append(bool(done))
@@ -155,7 +160,12 @@ def _record_one_episode(
 
     final_info = env.diagnostics()
     completed = bool(final_info.get("exit_triggered", False))
-    valid_action_contract = all(action >= 0 for action in actions)
+    label_valid_fraction = (
+        float(np.mean(label_valid)) if label_valid else 0.0
+    )
+    valid_action_contract = (
+        label_valid_fraction >= minimum_label_valid_fraction
+    )
     terminal_reason = (
         "engine_error" if engine_error
         else "interrupted" if interrupted
@@ -178,6 +188,8 @@ def _record_one_episode(
         "completed": completed,
         "terminal_reason": terminal_reason,
         "valid_action_contract": valid_action_contract,
+        "label_valid_fraction": label_valid_fraction,
+        "minimum_label_valid_fraction": minimum_label_valid_fraction,
         "unsupported_decisions": int(sum(unsupported.values())),
         "unsupported_button_vectors": dict(unsupported),
         "engine_error": engine_error,
@@ -188,6 +200,7 @@ def _record_one_episode(
     arrays = {
         "observations": np.asarray(observations, dtype=np.uint8),
         "actions": np.asarray(actions, dtype=np.int16),
+        "label_valid": np.asarray(label_valid, dtype=np.bool_),
         "rewards": np.asarray(rewards, dtype=np.float32),
         "raw_rewards": np.asarray(raw_rewards, dtype=np.float32),
         "dones": np.asarray(dones, dtype=np.bool_),
@@ -203,14 +216,20 @@ def main() -> int:
         raise ValueError("--episodes must be positive.")
     if args.episode_timeout is not None and args.episode_timeout <= 0:
         raise ValueError("--episode-timeout must be positive.")
+    if not 0.0 <= args.max_ambiguous_fraction < 0.5:
+        raise ValueError("--max-ambiguous-fraction must be in [0, 0.5).")
+    minimum_label_valid_fraction = 1.0 - args.max_ambiguous_fraction
 
     dataset_dir = args.dataset_dir.expanduser().resolve()
     validate_manifest(dataset_dir)
     print("CRSNN MAP01 demonstration recorder")
     print(f"Dataset        : {dataset_dir}")
     print(f"Action contract: {ACTION_CATALOGUE_HASH}")
-    print("Hold one action consistently for each four-tic model decision.")
-    print("Unsupported combinations are retained as invalid labels, never hidden.")
+    print("Natural supported key combinations are allowed.")
+    print(
+        "Ambiguous key-transition decisions are masked; accepted episodes need "
+        f"at least {minimum_label_valid_fraction:.1%} valid labels."
+    )
 
     saved = 0
     successful = 0
@@ -232,6 +251,7 @@ def main() -> int:
                 episode_id=episode_id,
                 seed=args.seed,
                 notes=args.notes,
+                minimum_label_valid_fraction=minimum_label_valid_fraction,
             )
             accepted = bool(
                 metadata["completed"] and metadata["valid_action_contract"]
@@ -254,7 +274,10 @@ def main() -> int:
                 print(f"  SHA-256     : {summary['sha256']}")
 
             print(f"  Completed   : {metadata['completed']}")
-            print(f"  Valid labels: {metadata['valid_action_contract']}")
+            print(f"  Coverage gate: {metadata['valid_action_contract']}")
+            print(
+                f"  Label coverage: {metadata['label_valid_fraction']:.1%}"
+            )
             print(f"  Terminal    : {metadata['terminal_reason']}")
             if metadata["terminal_reason"] in {"interrupted", "engine_error"}:
                 stop_requested = True

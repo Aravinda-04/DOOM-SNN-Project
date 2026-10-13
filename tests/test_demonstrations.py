@@ -29,6 +29,8 @@ def _metadata(episode_id: str = "episode-1", *, completed: bool = True) -> dict:
         "completed": completed,
         "terminal_reason": "completed" if completed else "timed_out",
         "valid_action_contract": True,
+        "label_valid_fraction": 1.0,
+        "minimum_label_valid_fraction": 0.95,
         "notes": "test",
     }
 
@@ -40,6 +42,7 @@ def _arrays(length: int = 3, *, completed: bool = True) -> dict:
     return {
         "observations": np.zeros((length, 4, 84, 84), dtype=np.uint8),
         "actions": np.arange(length, dtype=np.int16),
+        "label_valid": np.ones(length, dtype=np.bool_),
         "rewards": np.linspace(0, 1, length, dtype=np.float32),
         "raw_rewards": np.zeros(length, dtype=np.float32),
         "dones": dones,
@@ -90,8 +93,20 @@ def test_manifest_checksum_detects_modified_episode(tmp_path):
 def test_invalid_action_label_must_match_metadata(tmp_path):
     arrays = _arrays()
     arrays["actions"][1] = -1
-    with pytest.raises(ValueError, match="valid_action_contract"):
+    with pytest.raises(ValueError, match="Every valid label"):
         save_episode(tmp_path / "invalid.npz", metadata=_metadata(), **arrays)
+
+
+def test_masked_action_is_allowed_when_coverage_meets_threshold(tmp_path):
+    arrays = _arrays(length=20)
+    arrays["actions"][0] = -1
+    arrays["label_valid"][0] = False
+    metadata = _metadata()
+    metadata["label_valid_fraction"] = 0.95
+    save_episode(tmp_path / "masked.npz", metadata=metadata, **arrays)
+    payload = load_episode(tmp_path / "masked.npz")
+    assert payload["actions"][0] == -1
+    assert not payload["label_valid"][0]
 
 
 def test_manifest_rejects_a_different_contract(tmp_path):
@@ -154,6 +169,7 @@ def test_recorder_aligns_pre_action_observation_with_stable_action():
         episode_id="aligned",
         seed=0,
         notes="",
+        minimum_label_valid_fraction=0.95,
     )
     assert metadata["completed"] is True
     assert metadata["valid_action_contract"] is True
@@ -170,6 +186,7 @@ def test_recorder_marks_mid_decision_action_changes_invalid():
         episode_id="unstable",
         seed=0,
         notes="",
+        minimum_label_valid_fraction=0.95,
     )
     assert metadata["valid_action_contract"] is False
     assert metadata["unsupported_decisions"] == 1

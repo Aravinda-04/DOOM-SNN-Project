@@ -18,18 +18,17 @@ from unittest.mock import MagicMock, patch, PropertyMock
 
 def test_action_count():
     from doom_level_env import ACTIONS, ACTION_NAMES
-    assert len(ACTIONS) == 9, "Full level requires eight controls plus no-op."
-    assert len(ACTION_NAMES) == 9
+    assert len(ACTIONS) == 22
+    assert len(ACTION_NAMES) == 22
 
 
-def test_action_buttons_exclusive():
-    """Control actions are atomic and the final action is no-op."""
+def test_action_buttons_match_named_contract():
     from doom_level_env import ACTIONS, ACTION_NAMES
     for i, (name, action) in enumerate(zip(ACTION_NAMES, ACTIONS)):
-        expected = 0 if name == "noop" else 1
-        assert sum(action) == expected, (
-            f"Action {i} presses {sum(action)} buttons; expected {expected}."
-        )
+        if name == "noop":
+            assert sum(action) == 0
+        else:
+            assert sum(action) >= 1, f"Action {i} does not press a button."
 
 
 def test_frame_stack_depth():
@@ -180,7 +179,7 @@ def test_terminal_diagnostics_preserve_last_variables():
     assert info["position_y"] == 34.0
 
 
-@pytest.mark.parametrize("action", [-1, 9, 100])
+@pytest.mark.parametrize("action", [-1, 22, 100])
 def test_invalid_action_index_is_rejected(action):
     env, _, _ = _make_mock_env()
     with pytest.raises(IndexError):

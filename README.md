@@ -32,8 +32,8 @@ FreeDoom2 MAP01
     -> ViZDoom
     -> 4 x 84 x 84 grayscale observation
     -> CRSNN
-    -> 9 Q-values
-    -> forward / backward / strafe / turn / attack / use / no-op
+    -> 22 Q-values
+    -> atomic movement/combat controls, common combinations, and no-op
 ```
 
 The recurrent hidden state is carried across game frames. During replay
@@ -61,7 +61,7 @@ python src/train_level.py --model crsnn --device auto --validate-only
 ```
 
 This initializes ViZDoom, resets MAP01, builds the requested model, and verifies
-the `(4, 84, 84)` observation and nine-action Q-value contract. It does not
+the `(4, 84, 84)` observation and 22-action Q-value contract. It does not
 create a training run.
 
 ## Validate manual completion and actions
@@ -75,14 +75,17 @@ python src/manual_level_validation.py
 
 The game opens in ViZDoom spectator mode. Current local bindings use arrow keys
 for forward/backward/turning, comma and period for strafing, left control or
-mouse button 1 for attack, and space for use. Use only one configured action at
-a time during this validation run.
+mouse button 1 for attack, and space for use. You can play naturally: the
+catalogue includes the common movement, turning, attacking, and use
+combinations needed for MAP01.
 
 The command creates a timestamped JSON report under
-`reports/manual-validation/`. A valid report requires a real MAP01 exit and no
-simultaneous unsupported button combinations. Exit code `0` means the action
-contract passed, `1` means the level was not completed, `2` means completion
-used unsupported inputs, and `3` means an engine error occurred.
+`reports/manual-validation/`. Each four-tic decision is labelled by a 75%
+majority, so a one-tic key transition is tolerated. Ambiguous or uncommon
+combinations are masked rather than given a false label. A valid report
+requires a real MAP01 exit and at least 95% valid label coverage. Exit code `0`
+means the action contract passed, `1` means the level was not completed, `2`
+means label coverage was too low, and `3` means an engine error occurred.
 
 The frozen contract is defined in `src/agent_config.py`. Its hash is stored in
 new training configurations and validation reports so demonstrations and
@@ -94,7 +97,7 @@ checkpoints cannot silently use a different output ordering.
 python -m pytest -q -p no:cacheprovider
 ```
 
-The current suite contains 103 passing tests, including real-engine timeout,
+The current suite contains 121 passing tests, including real-engine timeout,
 death, and headless spectator-path checks. A real successful exit remains the
 manual Phase 0 acceptance gate.
 
@@ -110,13 +113,17 @@ python src/record_demonstrations.py `
 ```
 
 `--episodes` is the number of attempted playthroughs. With
-`--discard-failures`, only completed episodes with fully supported, temporally
-stable action labels are retained. Rerun the command until the manifest has at
-least 10 successful episodes.
+`--discard-failures`, only completed episodes with at least 95% valid labels
+are retained. Play normally with the supported combinations. Short boundary
+transitions are resolved by majority vote; unresolved decisions are masked and
+ignored during imitation learning. Rerun the command until the manifest has at
+least 10 successful episodes. Use `--max-ambiguous-fraction` to change the 5%
+default only for an explicitly documented dataset.
 
 The default dataset directory is `data/demonstrations/map01/`. Each episode is
 an independent compressed `.npz` containing aligned pre-action uint8 frame
-stacks, action indices, rewards, terminal flags, positions, and game times.
+stacks, action indices, per-step label-valid masks, rewards, terminal flags,
+positions, and game times.
 `manifest.json` stores episode checksums and the frozen agent-contract hash.
 Datasets are ignored by Git because recordings can become large.
 
@@ -205,7 +212,7 @@ The canonical model for the active objective is:
 
 | Model | Role | Trainable parameters |
 | --- | --- | ---: |
-| `crsnn` | Dense all-to-all recurrent spiking model | 1,903,736 |
+| `crsnn` | Dense all-to-all recurrent spiking model | 1,910,918 |
 
 Other architectures remain in the repository as historical or inactive code;
 the current plan does not compare them. Run `python src/train_level.py --help`

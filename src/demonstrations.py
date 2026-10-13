@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import random
 import tempfile
@@ -22,11 +23,12 @@ from agent_config import (
 )
 
 
-DEMONSTRATION_SCHEMA_VERSION = 1
+DEMONSTRATION_SCHEMA_VERSION = 2
 MANIFEST_FILENAME = "manifest.json"
 REQUIRED_ARRAYS = (
     "observations",
     "actions",
+    "label_valid",
     "rewards",
     "raw_rewards",
     "dones",
@@ -63,6 +65,7 @@ def _validate_payload(
     *,
     observations: np.ndarray,
     actions: np.ndarray,
+    label_valid: np.ndarray,
     rewards: np.ndarray,
     raw_rewards: np.ndarray,
     dones: np.ndarray,
@@ -86,6 +89,7 @@ def _validate_payload(
         raise ValueError("A demonstration episode cannot be empty.")
     expected_vectors = {
         "actions": (actions, (length,)),
+        "label_valid": (label_valid, (length,)),
         "rewards": (rewards, (length,)),
         "raw_rewards": (raw_rewards, (length,)),
         "dones": (dones, (length,)),
@@ -109,10 +113,23 @@ def _validate_payload(
         raise ValueError("Demonstration metadata has an incompatible schema version.")
     if metadata.get("agent_contract_sha256") != ACTION_CATALOGUE_HASH:
         raise ValueError("Demonstration uses a different agent/action contract.")
-    valid_actions = bool(np.all(actions >= 0))
+    if label_valid.dtype != np.bool_:
+        raise ValueError("label_valid must have boolean dtype.")
+    if np.any(label_valid & (actions < 0)):
+        raise ValueError("Every valid label must contain a catalogue action index.")
+    valid_fraction = float(np.mean(label_valid))
+    if not math.isclose(
+        float(metadata.get("label_valid_fraction", -1.0)),
+        valid_fraction,
+        rel_tol=0.0,
+        abs_tol=1e-7,
+    ):
+        raise ValueError("label_valid_fraction disagrees with the stored mask.")
+    minimum_fraction = float(metadata.get("minimum_label_valid_fraction", 1.0))
+    valid_actions = valid_fraction >= minimum_fraction
     if bool(metadata.get("valid_action_contract")) != valid_actions:
         raise ValueError(
-            "valid_action_contract does not agree with the recorded action labels."
+            "valid_action_contract does not agree with the label-validity mask."
         )
     if bool(metadata.get("completed")) and not bool(dones[-1]):
         raise ValueError("A completed demonstration must end with done=True.")
@@ -123,6 +140,7 @@ def save_episode(
     *,
     observations: np.ndarray,
     actions: np.ndarray,
+    label_valid: np.ndarray,
     rewards: np.ndarray,
     raw_rewards: np.ndarray,
     dones: np.ndarray,
@@ -137,6 +155,7 @@ def save_episode(
     _validate_payload(
         observations=observations,
         actions=actions,
+        label_valid=label_valid,
         rewards=rewards,
         raw_rewards=raw_rewards,
         dones=dones,
@@ -156,6 +175,7 @@ def save_episode(
                 handle,
                 observations=observations,
                 actions=actions,
+                label_valid=label_valid,
                 rewards=rewards,
                 raw_rewards=raw_rewards,
                 dones=dones,
@@ -197,6 +217,7 @@ def episode_summary(path: Path, *, successful_only: bool = False) -> dict:
         "sha256": sha256_file(Path(path)),
         "completed": bool(metadata["completed"]),
         "valid_action_contract": bool(metadata["valid_action_contract"]),
+        "label_valid_fraction": float(metadata["label_valid_fraction"]),
         "terminal_reason": metadata["terminal_reason"],
         "steps": int(payload["actions"].shape[0]),
         "created_at": metadata["created_at"],
@@ -272,6 +293,7 @@ def validate_manifest(dataset_dir: Path) -> dict:
             "episode_id",
             "completed",
             "valid_action_contract",
+            "label_valid_fraction",
             "terminal_reason",
             "steps",
         ):
