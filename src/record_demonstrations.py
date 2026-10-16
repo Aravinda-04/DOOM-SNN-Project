@@ -4,9 +4,12 @@ Each episode is stored independently as compressed uint8 observations plus
 aligned action and diagnostic arrays. A checksummed JSON manifest prevents
 silent mixing of incompatible action catalogues or damaged episode files.
 
+Each invocation records exactly one playthrough and then exits. Run the command
+again when you are ready to record another attempt.
+
 Example:
 
-    python src/record_demonstrations.py --episodes 10 --notes "route practice"
+    python src/record_demonstrations.py --notes "route practice"
 """
 
 from __future__ import annotations
@@ -54,7 +57,6 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Record checksummed human MAP01 demonstrations."
     )
-    parser.add_argument("--episodes", type=int, default=1)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--dataset-dir", type=Path, default=DEFAULT_DATASET_DIR)
     parser.add_argument("--notes", default="")
@@ -212,8 +214,6 @@ def _record_one_episode(
 
 def main() -> int:
     args = parse_args()
-    if args.episodes <= 0:
-        raise ValueError("--episodes must be positive.")
     if args.episode_timeout is not None and args.episode_timeout <= 0:
         raise ValueError("--episode-timeout must be positive.")
     if not 0.0 <= args.max_ambiguous_fraction < 0.5:
@@ -231,8 +231,8 @@ def main() -> int:
         f"at least {minimum_label_valid_fraction:.1%} valid labels."
     )
 
-    saved = 0
-    successful = 0
+    saved = False
+    successful = False
     stop_requested = False
     with DoomLevelEnvironment(
         config_file=LEVEL_CONFIG_PATH,
@@ -242,51 +242,50 @@ def main() -> int:
         episode_timeout=args.episode_timeout,
         spectator=True,
     ) as env:
-        for episode_index in range(args.episodes):
-            timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
-            episode_id = f"map01-{timestamp}-ep{episode_index:03d}"
-            print(f"\nEpisode {episode_index + 1}/{args.episodes}: {episode_id}")
-            metadata, arrays = _record_one_episode(
-                env,
-                episode_id=episode_id,
-                seed=args.seed,
-                notes=args.notes,
-                minimum_label_valid_fraction=minimum_label_valid_fraction,
-            )
-            accepted = bool(
-                metadata["completed"] and metadata["valid_action_contract"]
-            )
-            if arrays["actions"].size == 0:
-                print("  No decisions captured; episode was not saved.")
-            elif args.discard_failures and not accepted:
-                print(
-                    "  Discarded: completion and a valid action contract are "
-                    "required by --discard-failures."
-                )
-            else:
-                episode_path = dataset_dir / f"{episode_id}.npz"
-                save_episode(episode_path, metadata=metadata, **arrays)
-                summary = episode_summary(episode_path)
-                append_manifest_entry(dataset_dir, summary)
-                saved += 1
-                successful += int(accepted)
-                print(f"  Saved       : {episode_path}")
-                print(f"  SHA-256     : {summary['sha256']}")
-
-            print(f"  Completed   : {metadata['completed']}")
-            print(f"  Coverage gate: {metadata['valid_action_contract']}")
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+        episode_id = f"map01-{timestamp}"
+        print(f"\nRecording one playthrough: {episode_id}")
+        metadata, arrays = _record_one_episode(
+            env,
+            episode_id=episode_id,
+            seed=args.seed,
+            notes=args.notes,
+            minimum_label_valid_fraction=minimum_label_valid_fraction,
+        )
+        accepted = bool(
+            metadata["completed"] and metadata["valid_action_contract"]
+        )
+        if arrays["actions"].size == 0:
+            print("  No decisions captured; episode was not saved.")
+        elif args.discard_failures and not accepted:
             print(
-                f"  Label coverage: {metadata['label_valid_fraction']:.1%}"
+                "  Discarded: completion and a valid action contract are "
+                "required by --discard-failures."
             )
-            print(f"  Terminal    : {metadata['terminal_reason']}")
-            if metadata["terminal_reason"] in {"interrupted", "engine_error"}:
-                stop_requested = True
-                break
+        else:
+            episode_path = dataset_dir / f"{episode_id}.npz"
+            save_episode(episode_path, metadata=metadata, **arrays)
+            summary = episode_summary(episode_path)
+            append_manifest_entry(dataset_dir, summary)
+            saved = True
+            successful = accepted
+            print(f"  Saved       : {episode_path}")
+            print(f"  SHA-256     : {summary['sha256']}")
+
+        print(f"  Completed   : {metadata['completed']}")
+        print(f"  Coverage gate: {metadata['valid_action_contract']}")
+        print(
+            f"  Label coverage: {metadata['label_valid_fraction']:.1%}"
+        )
+        print(f"  Terminal    : {metadata['terminal_reason']}")
+        if metadata["terminal_reason"] in {"interrupted", "engine_error"}:
+            stop_requested = True
 
     validate_manifest(dataset_dir)
-    print(f"\nSaved episodes     : {saved}")
-    print(f"Successful episodes: {successful}")
+    print(f"\nSaved episode     : {saved}")
+    print(f"Successful episode: {successful}")
     print(f"Manifest            : {dataset_dir / 'manifest.json'}")
+    print("Run this command again when you are ready for another playthrough.")
     if stop_requested:
         return 130
     return 0 if successful > 0 else 1
