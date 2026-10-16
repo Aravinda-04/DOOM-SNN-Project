@@ -108,17 +108,18 @@ Record human playthroughs for CRSNN imitation training with:
 ```powershell
 python src/record_demonstrations.py `
   --discard-failures `
-  --notes "successful MAP01 routes"
+  --max-ambiguous-fraction 0.10 `
+  --notes "successful MAP01 route; 90% coverage threshold"
 ```
 
 The recorder captures one playthrough and exits, allowing you to rest or review
 the result before starting another. Run the command again for each attempt.
-With `--discard-failures`, only completed episodes with at least 95% valid
-labels are retained. Play normally with the supported combinations. Short
+With `--discard-failures`, this command retains only completed episodes with at
+least 90% valid labels. Play normally with the supported combinations. Short
 boundary transitions are resolved by majority vote; unresolved decisions are
 masked and ignored during imitation learning. Repeat until the manifest has at
-least 10 successful episodes. Use `--max-ambiguous-fraction` to change the 5%
-default only for an explicitly documented dataset.
+least 10 successful episodes. The explicit `--max-ambiguous-fraction 0.10`
+setting documents that up to 10% of decisions may be masked.
 
 The default dataset directory is `data/demonstrations/map01/`. Each episode is
 an independent compressed `.npz` containing aligned pre-action uint8 frame
