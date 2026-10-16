@@ -1,0 +1,298 @@
+{
+  "schema_version": 2,
+  "created_at": "2026-10-16T12:07:24.473812+00:00",
+  "updated_at": "2026-10-16T12:11:18.391919+00:00",
+  "agent_contract": {
+    "contract_version": 2,
+    "model": "crsnn",
+    "map_name": "map01",
+    "preprocessing_version": 1,
+    "frame_stack": 4,
+    "frame_height": 84,
+    "frame_width": 84,
+    "default_frame_skip": 4,
+    "button_names": [
+      "MOVE_FORWARD",
+      "MOVE_BACKWARD",
+      "MOVE_LEFT",
+      "MOVE_RIGHT",
+      "TURN_LEFT",
+      "TURN_RIGHT",
+      "ATTACK",
+      "USE"
+    ],
+    "action_names": [
+      "forward",
+      "backward",
+      "strafe_left",
+      "strafe_right",
+      "turn_left",
+      "turn_right",
+      "attack",
+      "use",
+      "noop",
+      "forward_turn_left",
+      "forward_turn_right",
+      "forward_strafe_left",
+      "forward_strafe_right",
+      "forward_attack",
+      "backward_attack",
+      "strafe_left_attack",
+      "strafe_right_attack",
+      "turn_left_attack",
+      "turn_right_attack",
+      "forward_turn_left_attack",
+      "forward_turn_right_attack",
+      "forward_use"
+    ],
+    "actions": [
+      [
+        true,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false
+      ],
+      [
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false
+      ],
+      [
+        false,
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        false
+      ],
+      [
+        false,
+        false,
+        false,
+        true,
+        false,
+        false,
+        false,
+        false
+      ],
+      [
+        false,
+        false,
+        false,
+        false,
+        true,
+        false,
+        false,
+        false
+      ],
+      [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false,
+        false
+      ],
+      [
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ],
+      [
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        true
+      ],
+      [
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false
+      ],
+      [
+        true,
+        false,
+        false,
+        false,
+        true,
+        false,
+        false,
+        false
+      ],
+      [
+        true,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false,
+        false
+      ],
+      [
+        true,
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        false
+      ],
+      [
+        true,
+        false,
+        false,
+        true,
+        false,
+        false,
+        false,
+        false
+      ],
+      [
+        true,
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ],
+      [
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        true,
+        false
+      ],
+      [
+        false,
+        false,
+        true,
+        false,
+        false,
+        false,
+        true,
+        false
+      ],
+      [
+        false,
+        false,
+        false,
+        true,
+        false,
+        false,
+        true,
+        false
+      ],
+      [
+        false,
+        false,
+        false,
+        false,
+        true,
+        false,
+        true,
+        false
+      ],
+      [
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        true,
+        false
+      ],
+      [
+        true,
+        false,
+        false,
+        false,
+        true,
+        false,
+        true,
+        false
+      ],
+      [
+        true,
+        false,
+        false,
+        false,
+        false,
+        true,
+        true,
+        false
+      ],
+      [
+        true,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        true
+      ]
+    ]
+  },
+  "agent_contract_sha256": "b9358f1506e0a4c62c3d54021276172692666cc220a1390ab201f858fa2147a3",
+  "episodes": [
+    {
+      "episode_id": "map01-20261016-173503-038265",
+      "file": "map01-20261016-173503-038265.npz",
+      "sha256": "aca2fab1b1f174a269b573d58f8e5bc47ee398922b078c8a0c988b3fbe82ae60",
+      "completed": true,
+      "valid_action_contract": true,
+      "label_valid_fraction": 0.90056134723336,
+      "terminal_reason": "completed",
+      "steps": 1247,
+      "created_at": "2026-10-16T12:05:03.038555+00:00",
+      "notes": "successful MAP01 route; 90% coverage gate"
+    },
+    {
+      "episode_id": "map01-20261016-173910-866122",
+      "file": "map01-20261016-173910-866122.npz",
+      "sha256": "2b516ba9ac642bd547de5853c1d475d54f51f6abbe8a4c3e253f0eb003775aab",
+      "completed": true,
+      "valid_action_contract": true,
+      "label_valid_fraction": 0.9048888888888889,
+      "terminal_reason": "completed",
+      "steps": 1125,
+      "created_at": "2026-10-16T12:09:10.866393+00:00",
+      "notes": "successful MAP01 route; 90% coverage gate"
+    }
+  ]
+}
