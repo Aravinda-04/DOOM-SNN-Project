@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "created_at": "2026-10-16T12:07:24.473812+00:00",
-  "updated_at": "2026-10-16T12:11:18.391919+00:00",
+  "updated_at": "2026-10-17T17:10:11.465401+00:00",
   "agent_contract": {
     "contract_version": 2,
     "model": "crsnn",
@@ -293,6 +293,18 @@
       "steps": 1125,
       "created_at": "2026-10-16T12:09:10.866393+00:00",
       "notes": "successful MAP01 route; 90% coverage gate"
+    },
+    {
+      "episode_id": "map01-20261017-221634-800082",
+      "file": "map01-20261017-221634-800082.npz",
+      "sha256": "2cb99e8efd312ec67de78ccfa9e770033dfc718549a5c6cf32c42655a9cd44af",
+      "completed": true,
+      "valid_action_contract": true,
+      "label_valid_fraction": 0.9029796216611188,
+      "terminal_reason": "completed",
+      "steps": 12317,
+      "created_at": "2026-10-17T16:46:34.800765+00:00",
+      "notes": "successful MAP01 route; 90% coverage threshold"
     }
   ]
 }
