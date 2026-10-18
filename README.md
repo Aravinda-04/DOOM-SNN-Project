@@ -20,6 +20,11 @@ demonstration-guided RL fine-tuning, and a standalone autonomous-play command.
 No completed full-level CRSNN benchmark has been established yet. Do not treat
 historical combat or corridor results as evidence that MAP01 is solved.
 
+The `semantic-policy-redesign` branch also contains a separate privileged
+engine-state pipeline. Its scripted expert and confidence-shielded GRU policy
+have completed the full MAP01 level. This result is not a vision-only result
+and is reported separately from the CRSNN objective.
+
 See [AUTONOMOUS_SNN_IMPLEMENTATION_PLAN.md](AUTONOMOUS_SNN_IMPLEMENTATION_PLAN.md)
 for the active single-agent implementation plan. The older
 [FULL_LEVEL_PROJECT_PLAN.md](FULL_LEVEL_PROJECT_PLAN.md) is retained as
@@ -39,6 +44,69 @@ FreeDoom2 MAP01
 The recurrent hidden state is carried across game frames. During replay
 training, gradients remain connected within the sampled sequence and reset at
 the explicit sequence boundary.
+
+## Engine-state MAP01 pipeline
+
+The alternative engine-state agent reads position, heading, health, ammunition,
+visible-object labels, and route context directly from ViZDoom. It predicts
+factorized locomotion, turning, attack, and use controls. A deterministic
+control shield handles low-confidence navigation, visible combat, interaction
+points, and recovery.
+
+The complete implementation plan is in
+[ENGINE_STATE_POLICY_IMPLEMENTATION_PLAN.md](ENGINE_STATE_POLICY_IMPLEMENTATION_PLAN.md).
+
+Verify the scripted expert first:
+
+```powershell
+python src/evaluate_engine_state_expert.py --progress-interval 100
+```
+
+Generate compact state/action sequences without recording images:
+
+```powershell
+python src/generate_engine_state_cases.py `
+  --episodes 12 `
+  --perturbation-probability 0.02 `
+  --seed 0
+```
+
+Validate CUDA/AMP training without creating a run:
+
+```powershell
+python src/train_engine_state_policy.py `
+  --validate-only `
+  --device cuda `
+  --amp
+```
+
+Train the recurrent policy:
+
+```powershell
+python src/train_engine_state_policy.py `
+  --run-id engine-state-map01-gru `
+  --epochs 60 `
+  --batch-size 32 `
+  --sequence-length 32 `
+  --stride 16 `
+  --closed-loop-interval 0 `
+  --device cuda `
+  --amp
+```
+
+Evaluate the best checkpoint visibly or headlessly:
+
+```powershell
+python src/evaluate_engine_state_policy.py `
+  --checkpoint models/engine_state/engine-state-map01-gru/best.pth `
+  --device cuda `
+  --shield-confidence 0.92 `
+  --render
+```
+
+The evaluator reports the safety-layer intervention fraction and reasons. Use
+`--no-control-shield` only to measure the raw learned policy; the current raw
+policy is not considered a completed MAP01 solution.
 
 ## Requirements
 
@@ -288,6 +356,5 @@ episode count, and estimated replay observation memory.
   hardware runtime.
 - Deployment and hardware work are intentionally deferred; current work is
   model-focused.
-- Demonstration recording and imitation-training code are implemented, but no
-  real successful dataset or trained MAP01 checkpoint exists yet. RL
-  demonstration fine-tuning and `play_level.py` remain.
+- The privileged engine-state completion does not demonstrate visual CRSNN
+  completion or cross-map generalization.

@@ -1,4 +1,6 @@
 __pycache__/
+.pytest_cache/
+.pytest_tmp/
 *.py[cod]
 *$py.class
 _vizdoom.ini

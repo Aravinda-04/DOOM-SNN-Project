@@ -224,3 +224,24 @@ def test_programmatic_step_is_rejected_in_spectator_mode():
     env._spectator = True
     with pytest.raises(RuntimeError, match="spectator_step"):
         env.step(0)
+
+
+def test_step_buttons_executes_factorized_button_vector():
+    env, mock_game, _ = _make_mock_env()
+    env.reset()
+    mock_game.make_action.return_value = 0.0
+    buttons = (True, False, False, False, False, True, True, False)
+
+    observation, _, done = env.step_buttons(buttons)
+
+    mock_game.make_action.assert_called_once_with(list(buttons), 4)
+    assert observation.shape == (4, 84, 84)
+    assert done is False
+
+
+def test_step_buttons_rejects_wrong_shape_and_non_binary_values():
+    env, _, _ = _make_mock_env()
+    with pytest.raises(ValueError, match="Expected 8"):
+        env.step_buttons((True,))
+    with pytest.raises(ValueError, match="binary"):
+        env.step_buttons((0, 0, 0, 0, 0, 0, 2, 0))

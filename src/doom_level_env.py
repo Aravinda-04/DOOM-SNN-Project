@@ -237,7 +237,28 @@ class DoomLevelEnvironment:
                 f"0..{self.num_actions - 1}."
             )
 
-        action = list(self.actions[int(action_idx)])
+        return self.step_buttons(self.actions[int(action_idx)])
+
+    def step_buttons(
+        self, buttons: tuple[bool, ...] | list[bool]
+    ) -> tuple[np.ndarray, float, bool]:
+        """Execute one validated raw button vector.
+
+        This entry point supports factorized policies without forcing their
+        commands back into the legacy 22-class catalogue.
+        """
+        if getattr(self, "_spectator", False):
+            raise RuntimeError(
+                "step_buttons() is unavailable in spectator mode; "
+                "use spectator_step()."
+            )
+        if len(buttons) != len(BUTTON_NAMES):
+            raise ValueError(
+                f"Expected {len(BUTTON_NAMES)} buttons, got {len(buttons)}."
+            )
+        if any(value not in (False, True, 0, 1) for value in buttons):
+            raise ValueError("Button values must be booleans or binary integers.")
+        action = [bool(value) for value in buttons]
         raw_reward = float(self.game.make_action(action, self._frame_skip))
         done = self.game.is_episode_finished()
 
