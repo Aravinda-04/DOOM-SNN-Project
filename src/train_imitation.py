@@ -13,7 +13,7 @@ from typing import Optional
 import numpy as np
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 from torch.utils.tensorboard import SummaryWriter
 
 from agent_config import (
@@ -28,6 +28,7 @@ from demonstrations import load_episode, sha256_file
 from doom_level_env import DoomLevelEnvironment
 from imitation_data import (
     DemonstrationSequenceDataset,
+    action_class_counts,
     action_class_weights,
     successful_episode_splits,
 )
@@ -59,6 +60,10 @@ class ImitationConfig:
     sparsity_weight: float
     gradient_accumulation_steps: int
     validation_fraction: float
+    balanced_sampling: bool
+    class_weighting: bool
+    sampling_minimum_support: int
+    sampling_maximum_weight: float
     amp: bool
     seed: int
     run_id: str
@@ -93,12 +98,23 @@ def imitation_sequence_loss(
         raise ValueError("burn_in must be smaller than the sequence window.")
 
     hidden: Optional[tuple] = None
-    with torch.no_grad():
+    # Keep recurrent context reconstruction in FP32 even when the caller wraps
+    # the learning window in autocast. snntorch can return a detached FP16
+    # hidden state from no-gradient burn-in that also disconnects subsequent
+    # CRSNN outputs from autograd. The burn-in is small, carries no graph, and
+    # only exists to establish temporal context, so FP32 is both safe and
+    # inexpensive here. Exiting this block restores the caller's autocast state
+    # for the gradient-bearing learning frames.
+    with torch.no_grad(), torch.autocast(
+        device_type=observations.device.type,
+        enabled=False,
+    ):
         for time_index in range(burn_in):
             _, _, hidden = model(observations[:, time_index], hidden)
     hidden = _detach_hidden(hidden)
 
     cross_entropy = torch.zeros((), device=observations.device)
+    cross_entropy_weight = torch.zeros((), device=observations.device)
     total_spikes = torch.zeros((), device=observations.device)
     correct = torch.zeros((), device=observations.device)
     valid_examples = torch.zeros((), device=observations.device)
@@ -112,6 +128,12 @@ def imitation_sequence_loss(
                 logits, targets, weight=class_weights, reduction="none"
             )
             cross_entropy = cross_entropy + per_example_loss[mask].sum()
+            if class_weights is None:
+                cross_entropy_weight = cross_entropy_weight + mask.sum()
+            else:
+                cross_entropy_weight = (
+                    cross_entropy_weight + class_weights[targets[mask]].sum()
+                )
             correct = correct + (
                 logits.argmax(dim=1)[mask] == targets[mask]
             ).sum()
@@ -120,7 +142,9 @@ def imitation_sequence_loss(
 
     if valid_examples.item() == 0:
         raise ValueError("Sequence batch contains no valid learning labels.")
-    cross_entropy = cross_entropy / valid_examples
+    if cross_entropy_weight.item() <= 0:
+        raise ValueError("Valid learning labels have zero total class weight.")
+    cross_entropy = cross_entropy / cross_entropy_weight
     opportunities = getattr(model, "spike_opportunities_per_sample", None)
     if opportunities is None:
         spike_rate = torch.zeros((), device=observations.device)
@@ -228,6 +252,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sparsity-weight", type=float, default=1e-3)
     parser.add_argument("--gradient-accumulation-steps", type=int, default=4)
     parser.add_argument("--validation-fraction", type=float, default=0.2)
+    parser.add_argument(
+        "--balanced-sampling",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Oversample recurrent windows containing supported rare actions.",
+    )
+    parser.add_argument(
+        "--class-weighting",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Weight cross-entropy by action frequency. This cannot be combined "
+            "with balanced sampling (default: disabled)."
+        ),
+    )
+    parser.add_argument("--sampling-minimum-support", type=int, default=20)
+    parser.add_argument("--sampling-maximum-weight", type=float, default=2.0)
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
@@ -245,6 +286,17 @@ def parse_args() -> argparse.Namespace:
         help="Epochs between autonomous MAP01 checks; 0 disables them.",
     )
     parser.add_argument("--closed-loop-episodes", type=int, default=1)
+    parser.add_argument(
+        "--closed-loop-render",
+        action="store_true",
+        help="Open the ViZDoom window during closed-loop evaluation.",
+    )
+    parser.add_argument(
+        "--closed-loop-delay",
+        type=float,
+        default=0.02,
+        help="Seconds to pause per rendered evaluation decision (default: 0.02).",
+    )
     parser.add_argument("--episode-timeout", type=int, default=None)
     parser.add_argument("--resume", type=Path, default=None)
     parser.add_argument("--validate-only", action="store_true")
@@ -272,8 +324,19 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--learning-rate must be positive.")
     if args.sparsity_weight < 0:
         raise ValueError("--sparsity-weight cannot be negative.")
+    if args.sampling_minimum_support <= 0:
+        raise ValueError("--sampling-minimum-support must be positive.")
+    if args.sampling_maximum_weight < 1.0:
+        raise ValueError("--sampling-maximum-weight must be at least 1.0.")
+    if args.balanced_sampling and args.class_weighting:
+        raise ValueError(
+            "--balanced-sampling and --class-weighting cannot be combined; "
+            "use only one imbalance correction strategy."
+        )
     if args.closed_loop_interval < 0:
         raise ValueError("--closed-loop-interval cannot be negative.")
+    if args.closed_loop_delay < 0:
+        raise ValueError("--closed-loop-delay cannot be negative.")
     if args.episode_timeout is not None and args.episode_timeout <= 0:
         raise ValueError("--episode-timeout must be positive.")
 
@@ -285,6 +348,8 @@ def _closed_loop_evaluation(
     episodes: int,
     seed: int,
     episode_timeout: Optional[int],
+    render: bool,
+    render_delay: float,
 ) -> dict:
     from train_level import evaluate_policy
 
@@ -296,6 +361,9 @@ def _closed_loop_evaluation(
         episodes=episodes,
         seeds=(seed,),
         episode_timeout=episode_timeout,
+        progress=True,
+        render=render,
+        render_delay=render_delay,
     )
 
 
@@ -334,7 +402,12 @@ def main() -> None:
         burn_in=args.burn_in,
         stride=args.stride,
     )
-    class_weights = action_class_weights(dataset_dir, training_entries).to(device)
+    class_counts = action_class_counts(dataset_dir, training_entries)
+    class_weights = (
+        action_class_weights(dataset_dir, training_entries).to(device)
+        if args.class_weighting
+        else None
+    )
     model = build_model(
         "crsnn",
         action_size=AGENT_CONTRACT.action_size,
@@ -343,10 +416,25 @@ def main() -> None:
     optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
     scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
     loader_generator = torch.Generator().manual_seed(args.seed)
+    sampler = None
+    sampling_weights = None
+    if args.balanced_sampling:
+        sampling_weights = training_dataset.balanced_sampling_weights(
+            class_counts,
+            minimum_support=args.sampling_minimum_support,
+            maximum_weight=args.sampling_maximum_weight,
+        )
+        sampler = WeightedRandomSampler(
+            sampling_weights,
+            num_samples=len(training_dataset),
+            replacement=True,
+            generator=loader_generator,
+        )
     train_loader = DataLoader(
         training_dataset,
         batch_size=args.batch_size,
-        shuffle=True,
+        shuffle=sampler is None,
+        sampler=sampler,
         num_workers=args.num_workers,
         generator=loader_generator,
         pin_memory=device.type == "cuda",
@@ -363,7 +451,23 @@ def main() -> None:
     print(f"Train/validation   : {len(training_entries)}/{len(validation_entries)}")
     print(f"Training windows   : {len(training_dataset)}")
     print(f"Validation windows : {len(validation_dataset)}")
-    print(f"Action weights     : {[round(v, 3) for v in class_weights.tolist()]}")
+    print(f"Balanced sampling  : {args.balanced_sampling}")
+    print(
+        "Loss weighting     : "
+        + ("class weighted" if class_weights is not None else "unweighted")
+    )
+    if sampling_weights is not None:
+        print(
+            "Sampling weights   : "
+            f"min={sampling_weights.min().item():.3f} "
+            f"mean={sampling_weights.mean().item():.3f} "
+            f"max={sampling_weights.max().item():.3f}"
+        )
+    if class_weights is not None:
+        print(
+            f"Action weights     : "
+            f"{[round(v, 3) for v in class_weights.tolist()]}"
+        )
 
     if args.validate_only:
         batch = next(iter(train_loader))
@@ -417,6 +521,10 @@ def main() -> None:
         sparsity_weight=args.sparsity_weight,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         validation_fraction=args.validation_fraction,
+        balanced_sampling=args.balanced_sampling,
+        class_weighting=args.class_weighting,
+        sampling_minimum_support=args.sampling_minimum_support,
+        sampling_maximum_weight=args.sampling_maximum_weight,
         amp=amp_enabled,
         seed=args.seed,
         run_id=run_id,
@@ -449,6 +557,10 @@ def main() -> None:
                 "sparsity_weight": args.sparsity_weight,
                 "gradient_accumulation_steps": args.gradient_accumulation_steps,
                 "validation_fraction": args.validation_fraction,
+                "balanced_sampling": args.balanced_sampling,
+                "class_weighting": args.class_weighting,
+                "sampling_minimum_support": args.sampling_minimum_support,
+                "sampling_maximum_weight": args.sampling_maximum_weight,
                 "amp": amp_enabled,
                 "seed": args.seed,
                 "run_id": run_id,
@@ -585,13 +697,43 @@ def main() -> None:
                     or epoch + 1 == args.epochs
                 )
             ):
+                print(
+                    f"  -> Closed-loop MAP01 evaluation after epoch "
+                    f"{epoch + 1}...",
+                    flush=True,
+                )
                 last_closed_loop = _closed_loop_evaluation(
                     model,
                     device,
                     episodes=args.closed_loop_episodes,
                     seed=args.seed,
                     episode_timeout=args.episode_timeout,
+                    render=args.closed_loop_render,
+                    render_delay=args.closed_loop_delay,
                 )
+                print(
+                    "     evaluation complete: "
+                    f"completion={last_closed_loop['completion_rate']:.1%} "
+                    f"reward={last_closed_loop['mean_reward']:+.2f} "
+                    f"regions={last_closed_loop['mean_sectors_visited']:.1f}",
+                    flush=True,
+                )
+                dominant_fraction = float(
+                    last_closed_loop["dominant_action_fraction"]
+                )
+                if dominant_fraction >= 0.80:
+                    dominant_action = max(
+                        ACTION_NAMES,
+                        key=lambda name: last_closed_loop[
+                            f"action_fraction_{name}"
+                        ],
+                    )
+                    print(
+                        "     WARNING: action collapse detected: "
+                        f"{dominant_action} accounts for "
+                        f"{dominant_fraction:.1%} of evaluation decisions.",
+                        flush=True,
+                    )
 
             duration = time.perf_counter() - started_at
             print(

@@ -423,8 +423,16 @@ def evaluate_policy(
     episodes: int,
     seeds: tuple[int, ...],
     episode_timeout: Optional[int] = None,
+    progress: bool = False,
+    progress_interval: int = 500,
+    render: bool = False,
+    render_delay: float = 0.0,
 ) -> dict:
     """Run ``episodes`` greedy episodes per seed and return aggregate stats."""
+    if progress_interval <= 0:
+        raise ValueError("progress_interval must be positive.")
+    if render_delay < 0:
+        raise ValueError("render_delay cannot be negative.")
     was_training = policy_net.training
     policy_net.eval()
     all_rewards: list[float] = []
@@ -432,46 +440,128 @@ def evaluate_policy(
     all_completions: list[bool] = []
     all_sectors: list[int] = []
     all_lengths: list[int] = []
+    all_action_counts = np.zeros(len(ACTION_NAMES), dtype=np.int64)
+    all_longest_action_streaks: list[int] = []
 
     try:
+        total_runs = len(seeds) * episodes
+        run_number = 0
         for seed in seeds:
             with env_class(
                 config_file=config_path,
-                render=False,
+                render=render,
                 seed=seed,
                 episode_timeout=episode_timeout,
             ) as env:
                 for _ in range(episodes):
+                    run_number += 1
+                    if progress:
+                        print(
+                            f"     eval run {run_number}/{total_runs} "
+                            f"(seed={seed}) started",
+                            flush=True,
+                        )
                     obs = env.reset()
                     hidden: Optional[tuple] = None
                     done = False
                     ep_reward = 0.0
                     ep_steps = 0
+                    episode_action_counts = np.zeros(
+                        len(ACTION_NAMES), dtype=np.int64
+                    )
+                    previous_action: Optional[int] = None
+                    action_streak = 0
+                    longest_action_streak = 0
                     while not done:
                         t = torch.from_numpy(obs).unsqueeze(0).to(device)
                         with torch.no_grad():
                             q_values, _, hidden = policy_net(t, hidden)
                         action = q_values.argmax(1).item()
+                        episode_action_counts[action] += 1
+                        if action == previous_action:
+                            action_streak += 1
+                        else:
+                            previous_action = action
+                            action_streak = 1
+                        longest_action_streak = max(
+                            longest_action_streak, action_streak
+                        )
                         obs, reward, done = env.step(action)
                         ep_reward += reward
                         ep_steps += 1
+                        if render and render_delay > 0:
+                            time.sleep(render_delay)
+                        if progress and ep_steps % progress_interval == 0:
+                            info = env.diagnostics()
+                            print(
+                                f"       steps={ep_steps} "
+                                f"reward={ep_reward:+.2f} "
+                                f"regions={info.get('sectors_visited', 0)} "
+                                f"kills={info.get('kill_count', 0.0):.0f}",
+                                flush=True,
+                            )
                     info = env.diagnostics()
                     all_rewards.append(ep_reward)
                     all_kills.append(info.get("kill_count", 0.0))
                     all_completions.append(bool(info.get("exit_triggered", False)))
                     all_sectors.append(info.get("sectors_visited", 0))
                     all_lengths.append(ep_steps)
+                    all_action_counts += episode_action_counts
+                    all_longest_action_streaks.append(longest_action_streak)
+                    if progress:
+                        top_actions = sorted(
+                            (
+                                (int(count), ACTION_NAMES[index])
+                                for index, count in enumerate(
+                                    episode_action_counts
+                                )
+                                if count > 0
+                            ),
+                            reverse=True,
+                        )[:5]
+                        distribution = ", ".join(
+                            f"{name}={count / max(ep_steps, 1):.1%}"
+                            for count, name in top_actions
+                        )
+                        print(
+                            f"     eval run {run_number}/{total_runs} finished: "
+                            f"terminal={info.get('terminal_reason', 'unknown')} "
+                            f"completion={bool(info.get('exit_triggered', False))} "
+                            f"steps={ep_steps} reward={ep_reward:+.2f}",
+                            flush=True,
+                        )
+                        print(
+                            f"       actions: {distribution}; "
+                            f"longest_repeat={longest_action_streak}",
+                            flush=True,
+                        )
     finally:
         policy_net.train(was_training)
 
-    return {
+    total_actions = int(all_action_counts.sum())
+    action_fractions = (
+        all_action_counts.astype(np.float64) / max(total_actions, 1)
+    )
+    result = {
         "mean_reward": float(np.mean(all_rewards)),
         "median_reward": float(np.median(all_rewards)),
         "completion_rate": float(np.mean(all_completions)),
         "mean_kills": float(np.mean(all_kills)),
         "mean_sectors_visited": float(np.mean(all_sectors)),
         "mean_episode_length": float(np.mean(all_lengths)),
+        "dominant_action_fraction": float(action_fractions.max()),
+        "unique_actions_used": int(np.count_nonzero(all_action_counts)),
+        "mean_longest_action_streak": float(
+            np.mean(all_longest_action_streaks)
+        ),
     }
+    result.update(
+        {
+            f"action_fraction_{name}": float(action_fractions[index])
+            for index, name in enumerate(ACTION_NAMES)
+        }
+    )
+    return result
 
 
 # ---------------------------------------------------------------------------

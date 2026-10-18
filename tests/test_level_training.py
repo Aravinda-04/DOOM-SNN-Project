@@ -4,7 +4,7 @@ import torch
 
 import numpy as np
 
-from train_level import bellman_targets, select_action
+from train_level import bellman_targets, evaluate_policy, select_action
 
 
 def test_terminal_transition_does_not_bootstrap():
@@ -49,3 +49,56 @@ def test_random_action_still_advances_recurrent_state(monkeypatch):
     assert policy.calls == 1
     assert hidden[0].item() == 1.0
     assert spikes == 2.0
+
+
+class _ShortEvaluationEnvironment:
+    def __init__(self, **_):
+        self.steps = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        return None
+
+    def reset(self):
+        self.steps = 0
+        return np.zeros((4, 84, 84), dtype=np.float32)
+
+    def step(self, _action):
+        self.steps += 1
+        return (
+            np.zeros((4, 84, 84), dtype=np.float32),
+            1.0,
+            self.steps == 2,
+        )
+
+    def diagnostics(self):
+        return {
+            "exit_triggered": self.steps == 2,
+            "terminal_reason": "completed" if self.steps == 2 else "in_progress",
+            "kill_count": 0.0,
+            "sectors_visited": self.steps,
+        }
+
+
+def test_evaluation_progress_reports_periodic_and_terminal_status(capsys, tmp_path):
+    stats = evaluate_policy(
+        _ShortEvaluationEnvironment,
+        tmp_path / "unused.cfg",
+        _CountingPolicy(),
+        torch.device("cpu"),
+        episodes=1,
+        seeds=(0,),
+        progress=True,
+        progress_interval=1,
+    )
+    output = capsys.readouterr().out
+    assert "eval run 1/1 (seed=0) started" in output
+    assert "steps=1" in output
+    assert "terminal=completed completion=True" in output
+    assert "actions: backward=100.0%; longest_repeat=2" in output
+    assert stats["completion_rate"] == 1.0
+    assert stats["dominant_action_fraction"] == 1.0
+    assert stats["unique_actions_used"] == 1
+    assert stats["mean_longest_action_streak"] == 2.0

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sys
+
 import numpy as np
 import pytest
 import torch
@@ -14,18 +16,29 @@ from demonstrations import (
 )
 from imitation_data import (
     DemonstrationSequenceDataset,
+    action_class_counts,
     action_class_weights,
     successful_episode_splits,
 )
-from train_imitation import imitation_sequence_loss
+from train_imitation import _validate_args, imitation_sequence_loss, parse_args
 
 
-def _add_episode(dataset_dir, episode_index: int, steps: int = 30) -> None:
+def _add_episode(
+    dataset_dir,
+    episode_index: int,
+    steps: int = 30,
+    actions: np.ndarray | None = None,
+) -> None:
     episode_id = f"episode-{episode_index}"
     observations = np.full(
         (steps, 4, 84, 84), episode_index * 20, dtype=np.uint8
     )
-    actions = np.arange(steps, dtype=np.int16) % AGENT_CONTRACT.action_size
+    if actions is None:
+        actions = np.arange(steps, dtype=np.int16) % AGENT_CONTRACT.action_size
+    else:
+        actions = np.asarray(actions, dtype=np.int16)
+        if actions.shape != (steps,):
+            raise ValueError("actions must have one entry per step.")
     dones = np.zeros(steps, dtype=np.bool_)
     dones[-1] = True
     metadata = {
@@ -90,7 +103,58 @@ def test_action_weights_are_finite_and_normalized_for_present_actions(tmp_path):
     weights = action_class_weights(tmp_path, training)
     assert weights.shape == (AGENT_CONTRACT.action_size,)
     assert torch.isfinite(weights).all()
-    assert weights[weights > 0].mean().item() == pytest.approx(1.0)
+    counts = torch.bincount(
+        torch.arange(30) % AGENT_CONTRACT.action_size,
+        minlength=AGENT_CONTRACT.action_size,
+    )
+    expected_sample_weight = (weights * counts).sum() / counts.sum()
+    assert expected_sample_weight.item() == pytest.approx(1.0)
+    assert weights[weights > 0].max() / weights[weights > 0].min() < 10.0
+
+
+def test_balanced_window_sampling_favors_supported_rare_actions(tmp_path):
+    actions = np.zeros(40, dtype=np.int16)
+    actions[20:28] = 1
+    _add_episode(tmp_path, 0, steps=40, actions=actions)
+    entries = [episode_summary(tmp_path / "episode-0.npz")]
+    dataset = DemonstrationSequenceDataset(
+        tmp_path,
+        entries,
+        sequence_length=4,
+        burn_in=0,
+        stride=4,
+    )
+    counts = action_class_counts(tmp_path, entries)
+    weights = dataset.balanced_sampling_weights(
+        counts,
+        minimum_support=1,
+        maximum_weight=4.0,
+    )
+    assert weights.shape == (len(dataset),)
+    assert weights.min().item() == pytest.approx(1.0)
+    assert weights.max().item() > weights.min().item()
+
+
+def test_default_balancing_uses_moderate_sampling_without_class_weights(
+    monkeypatch,
+):
+    monkeypatch.setattr(sys, "argv", ["train_imitation.py"])
+    args = parse_args()
+    _validate_args(args)
+    assert args.balanced_sampling is True
+    assert args.class_weighting is False
+    assert args.sampling_maximum_weight == pytest.approx(2.0)
+
+
+def test_sampling_and_class_weighting_cannot_be_stacked(monkeypatch):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["train_imitation.py", "--balanced-sampling", "--class-weighting"],
+    )
+    args = parse_args()
+    with pytest.raises(ValueError, match="cannot be combined"):
+        _validate_args(args)
 
 
 class _TinyRecurrentPolicy(nn.Module):
@@ -115,6 +179,17 @@ class _TinyRecurrentPolicy(nn.Module):
         return logits, spikes, (state,)
 
 
+class _DtypeTrackingPolicy(_TinyRecurrentPolicy):
+    def __init__(self, action_size: int = 2):
+        super().__init__(action_size)
+        self.state_dtypes = []
+
+    def forward(self, observation, hidden=None):
+        logits, spikes, new_hidden = super().forward(observation, hidden)
+        self.state_dtypes.append(new_hidden[0].dtype)
+        return logits, spikes, new_hidden
+
+
 def test_imitation_loss_detaches_burn_in_but_trains_learning_window():
     torch.manual_seed(0)
     model = _TinyRecurrentPolicy()
@@ -134,6 +209,51 @@ def test_imitation_loss_detaches_burn_in_but_trains_learning_window():
     assert torch.count_nonzero(observations.grad[:, :2]).item() == 0
     assert torch.count_nonzero(observations.grad[:, 2:]).item() > 0
     assert any(parameter.grad is not None for parameter in model.parameters())
+
+
+def test_imitation_burn_in_stays_float32_inside_autocast():
+    torch.manual_seed(0)
+    model = _DtypeTrackingPolicy()
+    observations = torch.rand(2, 5, 1, 2, 2)
+    actions = torch.tensor([[0, 1, 0, 1, 0], [1, 0, 1, 0, 1]])
+    with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+        loss, _ = imitation_sequence_loss(
+            model,
+            observations,
+            actions,
+            burn_in=2,
+            class_weights=None,
+            sparsity_weight=1e-3,
+        )
+    loss.backward()
+    assert model.state_dtypes[:2] == [torch.float32, torch.float32]
+    assert loss.requires_grad
+    assert any(parameter.grad is not None for parameter in model.parameters())
+
+
+def test_weighted_imitation_loss_is_invariant_to_global_weight_scale():
+    torch.manual_seed(0)
+    model = _TinyRecurrentPolicy()
+    observations = torch.rand(2, 5, 1, 2, 2)
+    actions = torch.tensor([[0, 1, 0, 1, 0], [1, 0, 1, 0, 1]])
+    weights = torch.tensor([0.5, 2.0])
+    loss, _ = imitation_sequence_loss(
+        model,
+        observations,
+        actions,
+        burn_in=1,
+        class_weights=weights,
+        sparsity_weight=0.0,
+    )
+    scaled_loss, _ = imitation_sequence_loss(
+        model,
+        observations,
+        actions,
+        burn_in=1,
+        class_weights=weights * 100.0,
+        sparsity_weight=0.0,
+    )
+    assert scaled_loss.item() == pytest.approx(loss.item())
 
 
 def test_tiny_recurrent_policy_can_overfit_a_fixed_sequence():

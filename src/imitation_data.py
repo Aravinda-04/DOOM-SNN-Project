@@ -109,18 +109,86 @@ class DemonstrationSequenceDataset(Dataset):
             "start": start,
         }
 
+    def balanced_sampling_weights(
+        self,
+        class_counts: torch.Tensor | np.ndarray,
+        *,
+        minimum_support: int = 20,
+        maximum_weight: float = 4.0,
+    ) -> torch.Tensor:
+        """Return one sampling weight per recurrent window.
 
-def action_class_weights(dataset_dir: Path, entries: Sequence[dict]) -> torch.Tensor:
-    """Return normalized inverse-frequency weights for actions that occur."""
+        Windows containing supported turning, combat, or interaction actions
+        are sampled more often than forward-only windows. Classes with too few
+        examples are deliberately excluded from oversampling so a one-off
+        label cannot dominate the training stream.
+        """
+        if minimum_support <= 0:
+            raise ValueError("minimum_support must be positive.")
+        if maximum_weight < 1.0:
+            raise ValueError("maximum_weight must be at least 1.0.")
+        counts = np.asarray(class_counts, dtype=np.int64)
+        if counts.shape != (AGENT_CONTRACT.action_size,):
+            raise ValueError(
+                f"class_counts must have shape ({AGENT_CONTRACT.action_size},)."
+            )
+        eligible = counts >= minimum_support
+        if not np.any(eligible):
+            return torch.ones(len(self), dtype=torch.double)
+        reference_count = int(counts[eligible].max())
+        action_weights = np.ones(AGENT_CONTRACT.action_size, dtype=np.float64)
+        action_weights[eligible] = np.minimum(
+            np.sqrt(reference_count / counts[eligible]),
+            maximum_weight,
+        )
+
+        window_weights = np.ones(len(self), dtype=np.float64)
+        for window_index, (filename, start, _) in enumerate(self.windows):
+            payload = self._load(filename)
+            learn_start = start + self.burn_in
+            learn_stop = start + self.window_length
+            valid = payload["label_valid"][learn_start:learn_stop]
+            actions = payload["actions"][learn_start:learn_stop][valid]
+            supported_actions = actions[eligible[actions]]
+            if supported_actions.size:
+                window_weights[window_index] = float(
+                    action_weights[supported_actions].max()
+                )
+        return torch.from_numpy(window_weights)
+
+
+def action_class_counts(dataset_dir: Path, entries: Sequence[dict]) -> torch.Tensor:
+    """Count valid expert labels for each action."""
     counts = np.zeros(AGENT_CONTRACT.action_size, dtype=np.int64)
     for entry in entries:
         payload = load_episode(dataset_dir / entry["file"])
         actions = payload["actions"][payload["label_valid"]]
         counts += np.bincount(actions, minlength=AGENT_CONTRACT.action_size)
+    return torch.from_numpy(counts)
+
+
+def action_class_weights(dataset_dir: Path, entries: Sequence[dict]) -> torch.Tensor:
+    """Return stable, frequency-balanced weights for actions that occur.
+
+    Full inverse-frequency weighting lets a class with only a handful of
+    examples outweigh common navigation actions by several orders of
+    magnitude. Use square-root inverse frequency, clip the remaining extremes,
+    and normalize the expected per-example weight to one instead.
+    """
+    counts = action_class_counts(dataset_dir, entries).numpy()
     weights = np.zeros_like(counts, dtype=np.float32)
     present = counts > 0
-    weights[present] = counts[present].sum() / counts[present].astype(np.float32)
+    total = counts[present].sum()
     if np.any(present):
-        weights[present] /= weights[present].mean()
+        weights[present] = np.sqrt(
+            total / counts[present].astype(np.float32)
+        )
+        sample_mean = float(np.dot(weights, counts) / total)
+        weights[present] /= sample_mean
+        weights[present] = np.clip(weights[present], 0.25, 5.0)
+        # Clipping changes the average loss scale, so restore an expected
+        # per-example weight of one for a stable learning-rate interpretation.
+        sample_mean = float(np.dot(weights, counts) / total)
+        weights[present] /= sample_mean
     return torch.from_numpy(weights)
 
