@@ -25,7 +25,11 @@ from engine_state_expert import EngineStateExpert
 from engine_state_observation import EngineStateBuilder, visible_enemies
 from evaluate_engine_state_policy import predicted_action
 from map01_route import Map01Route, angle_delta_degrees
-from networks.engine_state_policy import EngineStateGRUPolicy
+from networks.engine_state_policy import (
+    EngineStateGRUPolicy,
+    EngineStateMLPPolicy,
+    EngineStateSpikingPolicy,
+)
 from train_engine_state_policy import policy_loss
 
 
@@ -83,6 +87,18 @@ def test_route_context_advances_and_recommends_use():
     assert context.progress_fraction > 0
     assert context.use_recommended is True
     assert angle_delta_degrees(5, 355) == pytest.approx(10)
+
+
+def test_sparse_route_exposes_graph_edges_and_recovery():
+    route = Map01Route(
+        np.asarray(((0, 0), (100, 0), (200, 0), (300, 0)), dtype=np.float32),
+        source_sha256="f" * 64,
+        use_points=np.asarray(((1000, 1000),), dtype=np.float32),
+    )
+    assert route.edges == ((0, 1), (1, 2), (2, 3))
+    context = route.context(np.asarray((100, 200), dtype=np.float32), 1)
+    assert context.off_track
+    assert context.recovery
 
 
 def test_engine_state_marks_enemy_fields_invalid_when_no_enemy():
@@ -169,7 +185,17 @@ def test_engine_state_policy_all_heads_backpropagate():
     assert all(parameter.grad is not None for parameter in model.parameters())
 
 
-def test_policy_decoder_canonicalizes_use_at_interaction_point():
+def test_reactive_mlp_preserves_sequence_shape_without_hidden_state():
+    model = EngineStateMLPPolicy(
+        input_size=len(FEATURE_NAMES) * 2, hidden_size=16, num_layers=2
+    )
+    outputs, hidden = model(torch.randn(3, 5, len(FEATURE_NAMES) * 2))
+    assert hidden is None
+    assert outputs["locomotion"].shape == (3, 5, 5)
+    assert outputs["attack"].shape == (3, 5)
+
+
+def test_policy_decoder_does_not_inject_use_at_interaction_point():
     outputs = {
         "locomotion": torch.tensor([[5.0, 0.0, 0.0, 0.0, 0.0]]),
         "turning": torch.tensor([[0.0, 5.0, 0.0]]),
@@ -183,3 +209,62 @@ def test_policy_decoder_canonicalizes_use_at_interaction_point():
     ).context(np.asarray((0, 0), dtype=np.float32), 0)
     action = predicted_action(outputs, route=route)
     assert action == FactorizedAction(locomotion=Locomotion.FORWARD, use=True)
+
+
+def test_policy_decoder_does_not_inject_missing_use():
+    outputs = {
+        "locomotion": torch.tensor([[0.0, 5.0, 0.0, 0.0, 0.0]]),
+        "turning": torch.tensor([[5.0, 0.0, 0.0]]),
+        "attack": torch.tensor([-5.0]),
+        "use": torch.tensor([-5.0]),
+    }
+    route = Map01Route(
+        np.asarray(((0, 0), (10, 0)), dtype=np.float32),
+        source_sha256="e" * 64,
+        use_points=np.asarray(((0, 0),), dtype=np.float32),
+    ).context(np.asarray((0, 0), dtype=np.float32), 0)
+    assert route.use_recommended
+    assert predicted_action(outputs, route=route) == FactorizedAction(
+        locomotion=Locomotion.FORWARD
+    )
+
+
+def test_engine_state_spiking_policy_forward_and_backward():
+    model = EngineStateSpikingPolicy(
+        input_size=len(FEATURE_NAMES) * 2, hidden_size=16, num_steps=2
+    )
+    # Test 2D input (single step inference)
+    inputs_2d = torch.randn(2, len(FEATURE_NAMES) * 2)
+    outputs_2d, hidden = model(inputs_2d)
+    assert outputs_2d["locomotion"].shape == (2, 5)
+    assert outputs_2d["turning"].shape == (2, 3)
+    assert outputs_2d["attack"].shape == (2,)
+    assert outputs_2d["use"].shape == (2,)
+    assert isinstance(hidden, tuple) and len(hidden) == 2
+
+    # Test 3D input (sequence window training) with carried hidden state
+    inputs_3d = torch.randn(2, 4, len(FEATURE_NAMES) * 2)
+    outputs_3d, next_hidden = model(inputs_3d, hidden)
+    assert outputs_3d["locomotion"].shape == (2, 4, 5)
+    assert outputs_3d["turning"].shape == (2, 4, 3)
+    assert outputs_3d["attack"].shape == (2, 4)
+    assert outputs_3d["use"].shape == (2, 4)
+
+    # Test backpropagation through factorized loss
+    targets = torch.zeros(2, 4, 4, dtype=torch.long)
+    targets[:, 1:, 2] = 1
+    loss, losses = policy_loss(
+        outputs_3d,
+        targets,
+        locomotion_weights=torch.ones(5),
+        turning_weights=torch.ones(3),
+        attack_positive_weight=torch.tensor(1.0),
+        use_positive_weight=torch.tensor(1.0),
+    )
+    loss.backward()
+    assert all(
+        param.grad is not None
+        for param in model.parameters()
+        if param.requires_grad
+    )
+

@@ -13,10 +13,12 @@ from map01_route import RouteContext, angle_delta_degrees
 class ExpertConfig:
     hard_turn_degrees: float = 12.0
     moving_turn_degrees: float = 4.0
-    firing_cone_degrees: float = 5.0
+    # One four-tic turn can cross more than five degrees. Matching the route
+    # controller's tolerance prevents left/right oscillation around a target.
+    firing_cone_degrees: float = 12.0
     minimum_enemy_screen_area: float = 0.0015
-    fire_cooldown_steps: int = 3
-    use_cooldown_steps: int = 14
+    fire_cooldown_steps: int = 0
+    use_cooldown_steps: int = 4
 
 
 class EngineStateExpert:
@@ -45,6 +47,12 @@ class EngineStateExpert:
         if route.use_recommended and self._use_cooldown == 0:
             self._use_cooldown = self.config.use_cooldown_steps
             return FactorizedAction(locomotion=Locomotion.FORWARD, use=True)
+
+        # Recovery has priority over optional combat. Otherwise an enemy that
+        # repeatedly enters/leaves the minimum screen area can make the expert
+        # alternate between route turning and aim turning without moving.
+        if route.recovery or observation.stuck_steps >= 8:
+            return self._navigate(route, player_angle)
 
         enemy = observation.nearest_enemy
         should_engage = (
@@ -79,9 +87,15 @@ class EngineStateExpert:
                     Locomotion.FORWARD
                     if enemy.distance > 128.0
                     else Locomotion.STRAFE_LEFT
-                )
+                ),
+                attack=True,
             )
 
+        return self._navigate(route, player_angle)
+
+    def _navigate(
+        self, route: RouteContext, player_angle: float
+    ) -> FactorizedAction:
         error = angle_delta_degrees(route.bearing_degrees, player_angle)
         if error > self.config.hard_turn_degrees:
             return FactorizedAction(turning=Turning.LEFT)

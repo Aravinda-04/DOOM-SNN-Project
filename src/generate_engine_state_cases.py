@@ -34,7 +34,7 @@ from runtime_utils import resolve_device
 
 
 DEFAULT_ROUTE_DATA = PROJECT_ROOT / "data" / "demonstrations" / "map01"
-DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "data" / "generated" / "map01-engine-state"
+DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "data" / "generated" / "map01-engine-state-v2"
 
 
 PERTURBATIONS = (
@@ -54,6 +54,13 @@ def generate_episode(
     episode_timeout: int | None,
     behavior_model=None,
     behavior_device: torch.device | None = None,
+    expert_beta: float = 0.0,
+    perturbation_burst_min: int = 2,
+    perturbation_burst_max: int = 6,
+    initial_perturbation_steps: int = 0,
+    initial_perturbation_action: str = "random",
+    hidden_reset_interval: int = 0,
+    attack_cooldown_steps: int = 0,
 ) -> tuple[dict, dict[str, np.ndarray]]:
     builder = EngineStateBuilder()
     expert = EngineStateExpert()
@@ -69,6 +76,18 @@ def generate_episode(
     route_progress: list[float] = []
     perturbations = 0
     behavior_hidden = None
+    initial_actions = {
+        "random": FactorizedAction(),
+        "left": FactorizedAction(turning=Turning.LEFT),
+        "right": FactorizedAction(turning=Turning.RIGHT),
+        "backward": FactorizedAction(locomotion=Locomotion.BACKWARD),
+        "noop": FactorizedAction(),
+    }
+    if initial_perturbation_action not in initial_actions:
+        raise ValueError(f"Unknown initial perturbation: {initial_perturbation_action}")
+    perturbation_action = initial_actions[initial_perturbation_action]
+    perturbation_steps = int(initial_perturbation_steps)
+    attack_cooldown = 0
 
     with DoomLevelEnvironment(
         render=False,
@@ -80,6 +99,12 @@ def generate_episode(
         expert.reset()
         done = False
         while not done:
+            if (
+                behavior_hidden is not None
+                and hidden_reset_interval
+                and len(features) % hidden_reset_interval == 0
+            ):
+                behavior_hidden = None
             info = env.diagnostics()
             position = np.asarray(
                 (info["position_x"], info["position_y"]), dtype=np.float32
@@ -117,9 +142,37 @@ def generate_episode(
                     route=context,
                     ammunition=float(info["ammo2"] + info["ammo3"]),
                 )
-            elif rng.random() < perturbation_probability:
-                applied_action = rng.choice(PERTURBATIONS)
+                if rng.random() < expert_beta:
+                    applied_action = target_action
+
+            # Perturbations remain active during DAgger. Multi-step bursts make
+            # the policy encounter actual wall, corner, and wrong-heading
+            # recoveries instead of harmless one-frame deviations.
+            if perturbation_steps <= 0 and rng.random() < perturbation_probability:
+                perturbation_action = rng.choice(PERTURBATIONS)
+                perturbation_steps = rng.randint(
+                    perturbation_burst_min, perturbation_burst_max
+                )
+            if perturbation_steps > 0:
+                if (
+                    perturbation_action == FactorizedAction()
+                    and initial_perturbation_action == "random"
+                ):
+                    perturbation_action = rng.choice(PERTURBATIONS)
+                applied_action = perturbation_action
+                perturbation_steps -= 1
                 perturbations += 1
+
+            attack_cooldown = max(0, attack_cooldown - 1)
+            if applied_action.attack:
+                if attack_cooldown:
+                    applied_action = FactorizedAction(
+                        locomotion=applied_action.locomotion,
+                        turning=applied_action.turning,
+                        use=applied_action.use,
+                    )
+                else:
+                    attack_cooldown = attack_cooldown_steps + 1
 
             _, reward, done = env.step_buttons(compose_buttons(applied_action))
             features.append(observation.features)
@@ -151,6 +204,10 @@ def generate_episode(
         "perturbation_probability": perturbation_probability,
         "perturbations": perturbations,
         "behavior": "learned_policy" if behavior_model is not None else "expert",
+        "expert_beta": expert_beta,
+        "initial_perturbation_steps": initial_perturbation_steps,
+        "initial_perturbation_action": initial_perturbation_action,
+        "perturbation_burst": [perturbation_burst_min, perturbation_burst_max],
     }
     arrays = {
         "features": np.asarray(features, dtype=np.float32),
@@ -174,6 +231,27 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--perturbation-probability", type=float, default=0.02)
     parser.add_argument("--episode-timeout", type=int, default=None)
     parser.add_argument("--behavior-checkpoint", type=Path, default=None)
+    parser.add_argument(
+        "--expert-beta",
+        type=float,
+        default=0.15,
+        help="Probability of applying the expert during learned-policy DAgger rollouts.",
+    )
+    parser.add_argument("--perturbation-burst-min", type=int, default=2)
+    parser.add_argument("--perturbation-burst-max", type=int, default=6)
+    parser.add_argument(
+        "--initial-perturbation-steps",
+        type=int,
+        default=0,
+        help="Maximum randomized opening actions used to vary the initial state.",
+    )
+    parser.add_argument(
+        "--initial-perturbation-action",
+        choices=("random", "left", "right", "backward", "noop"),
+        default="random",
+    )
+    parser.add_argument("--hidden-reset-interval", type=int, default=0)
+    parser.add_argument("--attack-cooldown-steps", type=int, default=0)
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
     return parser.parse_args()
 
@@ -184,6 +262,16 @@ def main() -> int:
         raise ValueError("--episodes must be positive.")
     if not 0.0 <= args.perturbation_probability < 1.0:
         raise ValueError("--perturbation-probability must be in [0, 1).")
+    if not 0.0 <= args.expert_beta <= 1.0:
+        raise ValueError("--expert-beta must be in [0, 1].")
+    if not 1 <= args.perturbation_burst_min <= args.perturbation_burst_max:
+        raise ValueError("Perturbation burst bounds must satisfy 1 <= min <= max.")
+    if args.initial_perturbation_steps < 0:
+        raise ValueError("--initial-perturbation-steps cannot be negative.")
+    if args.hidden_reset_interval < 0:
+        raise ValueError("--hidden-reset-interval cannot be negative.")
+    if args.attack_cooldown_steps < 0:
+        raise ValueError("--attack-cooldown-steps cannot be negative.")
     output_dir = args.output_dir.expanduser().resolve()
     route = Map01Route.from_demonstrations(args.route_data)
     rng = random.Random(args.seed)
@@ -209,6 +297,19 @@ def main() -> int:
             episode_timeout=args.episode_timeout,
             behavior_model=behavior_model,
             behavior_device=behavior_device,
+            expert_beta=args.expert_beta if behavior_model is not None else 1.0,
+            perturbation_burst_min=args.perturbation_burst_min,
+            perturbation_burst_max=args.perturbation_burst_max,
+            initial_perturbation_steps=(
+                args.initial_perturbation_steps
+                if args.initial_perturbation_action != "random"
+                else rng.randint(0, args.initial_perturbation_steps)
+                if args.initial_perturbation_steps
+                else 0
+            ),
+            initial_perturbation_action=args.initial_perturbation_action,
+            hidden_reset_interval=args.hidden_reset_interval,
+            attack_cooldown_steps=args.attack_cooldown_steps,
         )
         episode_id = f"engine-map01-{datetime.now().strftime('%Y%m%d-%H%M%S-%f')}"
         metadata["episode_id"] = episode_id
