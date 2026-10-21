@@ -1,0 +1,301 @@
+# Reliability and experiment-management changes
+
+## Summary
+
+This update fixes path-dependent artifacts, unreliable checkpoint selection,
+hard-coded model choices, misleading quantization behavior, and missing runtime
+validation. Existing checkpoints and TensorBoard data were not deleted or
+overwritten.
+
+## Filesystem and experiment isolation
+
+- Added `src/project_paths.py` as the single source of truth for the repository
+  root, scenario config, checkpoint root, and TensorBoard root.
+- Paths no longer depend on the terminal or IDE working directory.
+- New experiments use `models/<model>/<run-id>/` and
+  `runs/<model>/<run-id>/`.
+- Run IDs contain a timestamp, microseconds, and seed. An explicitly reused run
+  ID is rejected unless `--resume` is supplied.
+- Every experiment writes its resolved configuration to `config.json`.
+- Existing `models/`, `src/models/`, `runs/`, and `src/runs/` content was
+  deliberately preserved.
+
+## Training and checkpoints
+
+- Replaced the source-edited `MODEL_TYPE` variable with a validated `--model`
+  argument.
+- Added command-line controls for episodes, DQN hyperparameters, evaluation,
+  seed, device, scenario configuration, run ID, and resume checkpoint.
+- Added a centralized model registry in `src/networks/__init__.py`; invalid
+  model names now fail with a clear error.
+- `best.pth` is now chosen by mean reward over greedy evaluation episodes.
+  Exploratory training episodes can no longer permanently win checkpoint
+  selection through a lucky early score.
+- `latest.pth` is saved after every episode.
+- Structured checkpoints contain model weights, optimizer state, episode,
+  global step, best evaluation mean, and resolved run configuration.
+- Legacy files such as `models/best_snn.pth`, which contain only a state
+  dictionary, remain loadable.
+- Target parameters now use `lerp_`, while integer and non-trainable buffers are
+  copied directly. This avoids applying floating-point soft-update arithmetic
+  to integer neuron buffers.
+- Weight clipping is now accurately described as an optional stability clamp,
+  not quantization.
+- Replay batches are assembled with `numpy.stack` before tensor conversion,
+  reducing Python overhead.
+- Random seeds are applied to Python, NumPy, PyTorch, CUDA, and ViZDoom.
+- Added configurable penalties for movement into a wall and identical actions
+  repeated beyond a threshold. These affect the replay target only; reported
+  episode reward remains the real ViZDoom reward.
+- Greedy checkpoint evaluation now runs across configurable ViZDoom seeds.
+- Best-checkpoint selection now prioritizes kill success rate, with mean reward
+  as the tie-breaker. Checkpoints also store `best_eval_success` while remaining
+  compatible with older files that do not contain it.
+
+Replay memory is not stored in checkpoints because a full image replay buffer
+can be hundreds of megabytes. Resumed runs rebuild it and repeat the configured
+warm-up period.
+
+## Evaluation
+
+- Added validated CLI model selection, checkpoint selection, episode count,
+  device, seed, config, render, and delay options.
+- The evaluator finds the newest structured best checkpoint and falls back to
+  the legacy root checkpoint.
+- Checkpoints are loaded and validated before ViZDoom opens a window.
+- Evaluation reports per-episode rewards plus mean and standard deviation.
+- Environment resources are closed through `finally` blocks.
+
+## SNN failure diagnostics
+
+- Added `src/diagnose.py` for deterministic, greedy, multi-seed SNN evaluation.
+- Reports success from `KILLCOUNT` instead of inferring it only from reward, and
+  distinguishes kills, deaths, and timeouts.
+- Captures per-episode action counts and traces, action streaks, ammunition use,
+  position span, stalled movement, Q-values, and action-selection margins.
+- Added a wall-loop heuristic for failed episodes with repeated movement into a
+  boundary or long attack-dominated action loops. This is a diagnostic flag,
+  not a replacement for viewing representative failed episodes.
+- Uses non-invasive forward hooks to measure spikes, neuron opportunities, and
+  firing rate for every LIF layer. The evaluated checkpoint is not modified.
+- Produces a full JSON report, flat episode CSV, aggregate/per-seed summaries,
+  SHA-256 checkpoint identity, and diagnostic TensorBoard events under
+  `reports/<model>/<checkpoint>/<timestamp>/`.
+- Added `AMMO2`, `KILLCOUNT`, `POSITION_X`, and `POSITION_Y` to the ViZDoom
+  scenario variables and exposed read-only environment diagnostics.
+- Added tests for outcome classification and correctly weighted spike-rate
+  aggregation.
+
+## Environment handling
+
+- `basic.cfg` is resolved from the repository root by default.
+- Missing or invalid configurations now raise an immediate contextual error;
+  initialization no longer prints a warning and continues in a broken state.
+- Added deterministic ViZDoom seeding and context-manager support.
+
+## Spiking-model semantics
+
+- Removed unused `spikegen` imports after the earlier switch from stochastic
+  rate coding to deterministic direct coding.
+- Documentation now states that RSNN recurrence spans internal neural time
+  steps for a single observation. State still resets between game frames.
+- True cross-frame RSNN state was not introduced because isolated-transition
+  replay is mathematically incompatible with hidden state carried across
+  arbitrary samples. That feature requires sequence replay and is a separate
+  algorithm change.
+
+## Quantized export
+
+- Added `src/quantization.py` with symmetric per-tensor quantization.
+- Added `src/export_quantized.py` supporting 4-, 8-, and 16-bit integer export.
+- Export files contain integer tensors, scales, source metadata, and measured
+  mean/maximum output error after dequantization.
+- The export is an explicit interchange format. It does not claim to be a
+  PeraMorphIQ bitstream or vendor deployment package.
+
+## Dependencies and tests
+
+- Pinned the tested Python package versions in `requirements.txt`.
+- Added tests for working-directory-independent paths, experiment directory
+  layout, run IDs, all three model contracts, invalid model selection,
+  structured checkpoint round trips, legacy checkpoint loading, and bounded
+  integer quantization.
+- Added `pytest.ini` for consistent test discovery.
+
+## New commands
+
+```powershell
+python src/train.py --model snn --episodes 200 --seed 0
+python src/eval.py --model snn --no-render
+python src/diagnose.py --model snn --checkpoint models/snn/snn-100-seed0/best.pth --episodes 20 --seeds 0 1 2 3 4
+python src/export_quantized.py --model snn --bits 8 --output exports/snn-int8.pt
+python -m pytest
+```
+
+## Shaped SNN experiment result
+
+Trained `models/snn/snn-100-shaped-seed0/best.pth` for 100 episodes with an
+epsilon floor of 0.2, decay of 5,000 steps, multi-seed validation, an eight-step
+repeat threshold, and two-point repeat/stalled-movement penalties. The original
+`models/snn/snn-100-seed0/` checkpoints were not modified.
+
+Both best checkpoints were evaluated greedily over the same 100 episodes: 20
+episodes for each seed from 0 through 4.
+
+| Metric | Original | Shaped run |
+| --- | ---: | ---: |
+| Success rate | 65% | 75% |
+| Mean reward | -74.36 | -39.60 |
+| Reward standard deviation | 216.86 | 201.30 |
+| Suspected wall-loop episodes | 28 | 8 |
+
+The improvement is meaningful for this fixed evaluation set, but a 100-episode
+training run is not evidence of convergence. Longer runs and additional unseen
+seeds are still required before freezing the model for FPGA conversion.
+
+## Turning and spawn-difficulty evaluation
+
+- Expanded the action space from three to five actions by adding `TURN_LEFT`
+  and `TURN_RIGHT`, allowing the agent to search beyond its initial view.
+- Enabled ViZDoom's labels buffer and measure initial target offset. A target
+  within 10% of screen center is an easy spawn by default; an off-center or
+  invisible target is a hard spawn.
+- Added spawn difficulty and hard-spawn success to JSON, CSV, console, and
+  TensorBoard diagnostics.
+- Added `--spawn-filter` to execute only `hard`, `easy`, `left`, `right`, or
+  `invisible` initial conditions. Rejected resets do not count toward the
+  requested episode total. Reports include attempts, skipped categories, and
+  success rates for each accepted spawn subtype.
+- Added `--max-spawn-attempts` as a per-seed safety bound so rare filters cannot
+  search indefinitely.
+- Checkpoint selection now ranks hard-spawn success first, total success second,
+  and mean reward third. Decision-count-based non-instant success remains a
+  descriptive metric but no longer determines selection.
+- Loading and quantized export infer output width from checkpoint weights.
+  Evaluation rejects action-count mismatches instead of silently mapping old
+  outputs to the wrong actions.
+
+The five-action run `models/snn/snn-100-search-seed0/best.pth` was trained for
+100 episodes. Corrected evaluation over 100 episodes and seeds 0 through 4
+reported 77% total success, 50% hard-spawn success (21/42), mean reward -64.0,
+and 4 suspected loop episodes. It demonstrates genuine search behavior, but
+50% hard-spawn success is not deployment-ready.
+
+## Balanced aiming fine-tuning
+
+- Added `--balanced-training` to alternate hard-left and hard-right initial
+  conditions, with bounded spawn sampling.
+- Added training-only visual aiming reward: reducing absolute target offset is
+  rewarded, while firing at an invisible or off-centre target is penalized.
+  Object labels remain privileged training signals and are not SNN inputs.
+- Added balanced evaluation with equal left/right samples and TensorBoard
+  metrics for left, right, and worst-direction success.
+- Checkpoint selection now prioritizes worst-direction success, then aggregate
+  hard-spawn success and mean reward.
+- Added unit coverage for spawn classification and aiming reward behavior.
+
+Fine-tuning resumed the archived 91% checkpoint at episode 776 in a separate
+`snn-1000-balanced-seed0` run. The selected episode-950 checkpoint achieved
+100% on its 30-case balanced validation set. On the established unseen-seed
+benchmark of 100 filtered hard spawns (seeds 10-14), it achieved 99% success,
+median reward 87, mean reward 79.5, and zero loop flags. A rendered four-case
+left/right verification also achieved 4/4 successes.
+
+The deployment copy is
+`models/snn/deployment-candidates/snn-balanced-hardspawn-99pct.pth`; its SHA-256
+is `c698ec68e5d818a666037a2524f639712ed768bb8e5c82f997a815874a3eff94`.
+
+## End-to-end INT8 verification
+
+- `diagnose.py` now accepts `--quantized-export`, validates the interchange
+  metadata, reconstructs the network from integer tensors and scales, and runs
+  it through the same rendered or headless ViZDoom diagnostics as FP32.
+- Added a reconstruction test and `src/compare_reports.py` for visual FP32/INT8
+  report comparisons.
+- Export-time random-input error was 0.01495 mean absolute and 0.04810 maximum.
+- Visual INT8 verification passed 4/4 filtered hard episodes.
+- On the matched 100-hard-spawn unseen-seed benchmark, FP32 and reconstructed
+  INT8 both achieved 99% success and zero loop flags. INT8 achieved 100% on
+  hard-left (52/52), 97.9% on hard-right (47/48), median reward 87, and mean
+  reward 79.77. FP32 achieved 98.1% left and 100% right with mean reward 79.45.
+- Outcomes agreed on 98/100 episodes; 64/100 complete action sequences were
+  identical. This validates software quantization behavior, but does not yet
+  validate fixed-point neuron dynamics or the PeraMorphIQ hardware runtime.
+
+Run `--help` on any command for its complete options.
+
+## Navigation learning correction (2026-09-19)
+
+- The 200-episode navigation run was unstable: best at episode 150 was 3/8
+  validation completions, all left turns; episode 200 was 0/8. Best policy
+  issued 1,478 attack actions over eight monster-free validation episodes.
+- Navigation training now allows only five movement/turn actions across random
+  exploration, greedy selection, Bellman targets and environment transitions.
+  Combat still has seven outputs/actions so navigation weights can be reused.
+  New checkpoints record the stage action set; old navigation checkpoints retain
+  their historical action semantics when loaded for evaluation.
+- Reward now includes an explicit timeout penalty and a sustained lack-of-progress
+  penalty. Progress shaping is stronger and DQN reward scaling is 25 instead of
+  100. Task and shaping components are logged separately; evaluation reports
+  per-turn completion, maximum progress and action counts.
+- Added optional `compact_conv_snn` for later controlled comparison with the
+  pooled compact model, plus weight/state/operation profiling. Training must
+  use a fresh run ID because reward semantics changed.
+- A 25-episode pure-RL probe still validated at 0/8: 2,736 turns, 32 forward
+  actions and average maximum route progress 2.18%. Attack actions were zero,
+  proving the stage mask works but exposing poor forward learning.
+- Added optional scripted navigation demonstrations for training-only imitation
+  and replay prefill. A bootstrap checkpoint and validation plot are saved
+  before DQN training; a lower initial exploration rate can preserve the learned
+  route while fine-tuning. No privileged position enters the policy input.
+
+### Direction-balance follow-up (2026-09-20)
+
+- Corridor checkpoint selection now ranks the weaker left/right completion rate
+  first, then overall completion and mean task reward. TensorBoard logs this
+  worst-direction metric; a regression test covers the ranking.
+- A pooled SNN with 16 demonstrations and 300 supervised updates completed 4/8
+  held-out cases, all left. The convolutional probe also completed only the
+  left cases. A two-episode warm-start probe flipped to 4/8 right and 0/4 left.
+- Increasing imitation to 1000 updates yielded 0/8 at bootstrap and after one
+  RL episode, with the policy orbiting the first corridor. More updates alone are therefore not a
+  demonstrated fix. These are short probes, not final benchmark estimates.
+- Saved visual comparisons under `reports/corridor/`; see `CORRIDOR.md` for
+  exact artifacts and the revised navigation gate. All 34 tests pass.
+
+## Corridor software milestone (2026-09-19)
+
+### Configuration consistency follow-up
+
+- Moved corridor engine defaults into tracked `scenarios/corridor.cfg`: scenario
+  path, initial map, buttons, variables, rendering, difficulty and episode timing.
+- CorridorEnvironment now loads that file and validates action-button order,
+  required game variables and grayscale format before starting ViZDoom.
+- Removed the implicit CLI timeout override so the configuration timeout applies
+  unless `--timeout` is supplied. Seeds, stage maps and diagnostic options remain
+  runtime choices. Existing seven-action corridor checkpoints remain compatible.
+- Added real-engine tests for working-directory independence, changed config
+  timeouts, explicit timeout overrides and rejection of reordered buttons.
+- Verification: 27 tests passed; recorded scripted traversal completed both
+  mirrored routes in 52 decisions each. Dashboard visually inspected; artifacts
+  saved under `reports/corridor/cfg-refactor-check/`. No retraining was needed.
+
+- Added an independent generated UDMF corridor environment with mirrored turns,
+  navigation/combat stages, seven actions, task-specific completion criteria,
+  and separate training/evaluation cases. Generated maps and per-instance engine
+  configuration are isolated from the existing basic scenario.
+- Added `src/corridor.py` for training, curriculum weight warm starts, checkpoint
+  validation, scripted environment smoke tests and visual evaluation. Checkpoints
+  are kept under `models/corridor/`; old five-action policies are rejected.
+- Evaluation saves a gameplay/input/Q-value/spike dashboard video, trajectory and
+  outcome plots, and JSON metrics. Training validation also saves plots and JSON.
+  Progress shaping uses privileged coordinates only during training, never as
+  policy inputs or reported evaluation reward.
+- Added `compact_snn` and `src/profile_models.py` for experimental compression and
+  resource comparisons. The seven-action compact network has 33,664 weights and
+  135 LIF state values; hardware equivalence and gameplay reliability are unverified.
+- Added `CORRIDOR.md` with Windows CMD commands, scope, limitations and results.
+- Verified 24 tests, all 32 maps in ViZDoom, 8/8 scripted traversal cases, short
+  navigation and combat training, checkpoint reload, video decoding and visual QA.
+  The two-episode combat smoke policy completed 0/2 full-timeout evaluations
+  (one death, one timeout). No long training run or FPGA deployment was performed.
