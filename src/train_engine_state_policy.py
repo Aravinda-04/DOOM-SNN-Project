@@ -61,6 +61,7 @@ def policy_loss(
     use_positive_weight: torch.Tensor,
     recovery_mask: torch.Tensor | None = None,
     recovery_loss_weight: float = 0.0,
+    attack_loss_weight: float = 1.0,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     locomotion = F.cross_entropy(
         outputs["locomotion"].reshape(-1, 5),
@@ -82,7 +83,7 @@ def policy_loss(
         targets[..., 3].float().reshape(-1),
         pos_weight=use_positive_weight,
     )
-    total = locomotion + turning + attack + use
+    total = locomotion + turning + (attack_loss_weight * attack) + use
     losses = {
         "locomotion": locomotion.detach(),
         "turning": turning.detach(),
@@ -211,6 +212,18 @@ def parse_args() -> argparse.Namespace:
         default=0.67,
         help="Required raw-policy completion rate across closed-loop seeds.",
     )
+    parser.add_argument(
+        "--attack-loss-weight",
+        type=float,
+        default=1.0,
+        help="Multiplier for the binary cross-entropy attack loss.",
+    )
+    parser.add_argument(
+        "--num-steps",
+        type=int,
+        default=4,
+        help="Internal simulation steps per frame for the SNN architecture.",
+    )
     return parser.parse_args()
 
 
@@ -297,11 +310,14 @@ def main() -> None:
         "snn": EngineStateSpikingPolicy,
     }
     policy_class = policy_classes[args.architecture]
-    model = policy_class(
-        input_size=input_size,
-        hidden_size=args.hidden_size,
-        num_layers=args.num_layers,
-    ).to(device)
+    policy_kwargs = {
+        "input_size": input_size,
+        "hidden_size": args.hidden_size,
+        "num_layers": args.num_layers,
+    }
+    if args.architecture == "snn":
+        policy_kwargs["num_steps"] = args.num_steps
+    model = policy_class(**policy_kwargs).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate)
     scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
 
@@ -376,6 +392,7 @@ def main() -> None:
                 "input_size": input_size,
                 "hidden_size": args.hidden_size,
                 "num_layers": args.num_layers,
+                "num_steps": int(getattr(model, "num_steps", 4)),
                 "epoch": epoch,
                 "best_score": best_score,
                 "best_completion_rate": best_completion_rate,
@@ -412,6 +429,7 @@ def main() -> None:
                         inputs[..., FEATURE_INDEX["stuck_fraction"]] > 0.15
                     ),
                     recovery_loss_weight=args.recovery_loss_weight,
+                    attack_loss_weight=args.attack_loss_weight,
                 )
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)

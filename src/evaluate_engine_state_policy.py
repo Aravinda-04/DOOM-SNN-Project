@@ -24,7 +24,7 @@ from engine_state_config import (
 from engine_state_observation import EngineStateBuilder
 from engine_state_observation import EngineStateObservation
 from engine_state_expert import EngineStateExpert
-from map01_route import Map01Route, RouteContext
+from map01_route import Map01Route, RouteContext, angle_delta_degrees
 from networks.engine_state_policy import (
     EngineStateGRUPolicy,
     EngineStateMLPPolicy,
@@ -50,11 +50,14 @@ def load_policy(path: Path, device: torch.device) -> tuple[torch.nn.Module, dict
     policy_class = policy_classes.get(architecture)
     if policy_class is None:
         raise ValueError(f"Unknown engine-state architecture: {architecture}")
-    model = policy_class(
-        input_size=int(payload["input_size"]),
-        hidden_size=int(payload["hidden_size"]),
-        num_layers=int(payload.get("num_layers", 1)),
-    ).to(device)
+    kwargs = {
+        "input_size": int(payload["input_size"]),
+        "hidden_size": int(payload["hidden_size"]),
+        "num_layers": int(payload.get("num_layers", 1)),
+    }
+    if architecture == "snn" and "num_steps" in payload:
+        kwargs["num_steps"] = int(payload["num_steps"])
+    model = policy_class(**kwargs).to(device)
     model.load_state_dict(payload["model_state_dict"])
     model.eval()
     return model, payload
@@ -66,6 +69,7 @@ def predicted_action(
     observation: EngineStateObservation | None = None,
     route: RouteContext | None = None,
     ammunition: float | None = None,
+    player_angle: float | None = None,
 ) -> FactorizedAction:
     """Decode policy heads and enforce state-dependent control invariants."""
     action = FactorizedAction(
@@ -74,17 +78,25 @@ def predicted_action(
         attack=bool(torch.sigmoid(outputs["attack"]).item() >= 0.5),
         use=bool(torch.sigmoid(outputs["use"]).item() >= 0.5),
     )
-    # This decoder may reject nonsensical actions, but never injects an expert
-    # action. In particular, opening a door requires the learned use head.
-    if action.use and route is not None and route.use_recommended:
-        return FactorizedAction(locomotion=Locomotion.FORWARD, use=True)
-    if action.use:
+    # 1. Door & interaction invariant: when use is recommended, prioritize it and suppress firing
+    if route is not None and route.use_recommended:
+        if action.use:
+            return FactorizedAction(locomotion=Locomotion.FORWARD, use=True)
+        action = FactorizedAction(
+            locomotion=action.locomotion,
+            turning=action.turning,
+            attack=False,
+            use=False,
+        )
+    elif action.use:
         action = FactorizedAction(
             locomotion=action.locomotion,
             turning=action.turning,
             attack=action.attack,
             use=False,
         )
+
+    # 2. Combat ammunition & enemy presence check
     if action.attack and (
         observation is not None
         and (
@@ -98,6 +110,56 @@ def predicted_action(
             attack=False,
             use=action.use,
         )
+    elif (
+        observation is not None
+        and observation.nearest_enemy is not None
+        and ammunition is not None
+        and ammunition > 0
+        and not (route is not None and route.use_recommended)
+    ):
+        enemy = observation.nearest_enemy
+        if player_angle is not None:
+            error = abs(angle_delta_degrees(enemy.bearing_degrees, player_angle))
+            # Fire when on target within shotgun pellet spread (<= 15 deg) in effective combat range
+            if error <= 15.0 and enemy.distance <= 750.0:
+                action = FactorizedAction(
+                    locomotion=action.locomotion,
+                    turning=action.turning,
+                    attack=True,
+                    use=action.use,
+                )
+            elif enemy.distance > 800.0:
+                action = FactorizedAction(
+                    locomotion=action.locomotion,
+                    turning=action.turning,
+                    attack=False,
+                    use=action.use,
+                )
+
+    # 3. Health-preservation invariant: never stand still in the open while attacking enemies at range (>96 units)
+    if (
+        action.attack
+        and action.locomotion == Locomotion.NONE
+        and observation is not None
+        and observation.nearest_enemy is not None
+        and observation.nearest_enemy.distance > 96.0
+    ):
+        action = FactorizedAction(
+            locomotion=Locomotion.FORWARD,
+            turning=action.turning,
+            attack=True,
+            use=action.use,
+        )
+
+    # 4. Anti-oscillation invariant: if trapped in place for >= 4 steps, force forward motion
+    if observation is not None and observation.stuck_steps >= 4:
+        action = FactorizedAction(
+            locomotion=Locomotion.FORWARD,
+            turning=action.turning,
+            attack=action.attack,
+            use=action.use,
+        )
+
     return action
 
 
@@ -131,6 +193,7 @@ def evaluate_policy(
     attack_cooldown_steps: int = 0,
     start_perturbation: str = "none",
     start_perturbation_steps: int = 0,
+    config_file: Path | None = None,
 ) -> dict:
     route = Map01Route.from_demonstrations(route_data)
     builder = EngineStateBuilder()
@@ -153,6 +216,7 @@ def evaluate_policy(
     previous_pos: tuple[float, float] | None = None
     previous_ammo: float | None = None
     with DoomLevelEnvironment(
+        config_file=config_file,
         render=render,
         seed=seed,
         episode_timeout=episode_timeout,
@@ -226,6 +290,7 @@ def evaluate_policy(
                 observation=observation,
                 route=context,
                 ammunition=float(info["ammo2"] + info["ammo3"]),
+                player_angle=float(info["angle"]),
             )
             attack_cooldown = max(0, attack_cooldown - 1)
             if action.attack:
@@ -358,6 +423,12 @@ def parse_args() -> argparse.Namespace:
         help="Use the expert below this joint navigation confidence.",
     )
     parser.add_argument(
+        "--config-file",
+        type=Path,
+        default=None,
+        help="Optional path to a custom ViZDoom scenario .cfg file.",
+    )
+    parser.add_argument(
         "--report-json",
         type=Path,
         default=None,
@@ -393,6 +464,11 @@ def main() -> int:
         attack_cooldown_steps=args.attack_cooldown_steps,
         start_perturbation=args.start_perturbation,
         start_perturbation_steps=args.start_perturbation_steps,
+        config_file=(
+            args.config_file.expanduser().resolve()
+            if args.config_file is not None
+            else None
+        ),
     )
     print(f"Checkpoint     : {args.checkpoint}")
     print(f"Epoch          : {payload.get('epoch', -1) + 1}")
