@@ -49,6 +49,26 @@ class VisibleEnemy:
     screen_area: float
 
 
+HEALTH_ITEM_TOKENS = {
+    "medikit": (25, 1.0),
+    "stimpack": (10, 0.7),
+    "healthbonus": (1, 0.2),
+    "soulsphere": (100, 2.0),
+}
+
+
+@dataclass(frozen=True)
+class VisibleHealthItem:
+    name: str
+    heal_amount: int
+    priority: float
+    distance: float
+    bearing_degrees: float
+    position: tuple[float, float]
+    screen_x: float
+    screen_area: float
+
+
 @dataclass(frozen=True)
 class EngineStateObservation:
     features: np.ndarray
@@ -56,6 +76,8 @@ class EngineStateObservation:
     nearest_enemy: Optional[VisibleEnemy]
     visible_enemy_count: int
     stuck_steps: int
+    nearest_health_item: Optional[VisibleHealthItem] = None
+    visible_health_item_count: int = 0
 
 
 def _is_hostile_label(label: object) -> bool:
@@ -92,6 +114,53 @@ def visible_enemies(
             )
         )
     return sorted(enemies, key=lambda enemy: enemy.distance)
+
+
+def _is_health_label(label: object) -> bool:
+    name = str(getattr(label, "object_name", "")).lower()
+    return any(token in name for token in HEALTH_ITEM_TOKENS)
+
+
+def _health_item_info(name: str) -> tuple[int, float]:
+    lower = name.lower()
+    for token, (heal, prio) in HEALTH_ITEM_TOKENS.items():
+        if token in lower:
+            return heal, prio
+    return 10, 0.5
+
+
+def visible_health_items(
+    labels: Iterable[object],
+    *,
+    player_x: float,
+    player_y: float,
+) -> list[VisibleHealthItem]:
+    items: list[VisibleHealthItem] = []
+    for label in labels:
+        if not _is_health_label(label):
+            continue
+        item_x = float(getattr(label, "object_position_x", player_x))
+        item_y = float(getattr(label, "object_position_y", player_y))
+        dx = item_x - player_x
+        dy = item_y - player_y
+        width = max(float(getattr(label, "width", 0.0)), 0.0)
+        height = max(float(getattr(label, "height", 0.0)), 0.0)
+        left = float(getattr(label, "x", 80.0))
+        name = str(getattr(label, "object_name", "unknown"))
+        heal_amount, priority = _health_item_info(name)
+        items.append(
+            VisibleHealthItem(
+                name=name,
+                heal_amount=heal_amount,
+                priority=priority,
+                distance=float(math.hypot(dx, dy)),
+                bearing_degrees=float(math.degrees(math.atan2(dy, dx)) % 360.0),
+                position=(item_x, item_y),
+                screen_x=float(np.clip((left + width / 2.0) / 160.0, 0.0, 1.0)),
+                screen_area=float(np.clip(width * height / (160.0 * 120.0), 0.0, 1.0)),
+            )
+        )
+    return sorted(items, key=lambda item: (item.distance / max(item.priority, 0.1)))
 
 
 class EngineStateBuilder:
@@ -144,6 +213,8 @@ class EngineStateBuilder:
 
         enemies = visible_enemies(labels, player_x=x, player_y=y)
         nearest = enemies[0] if enemies else None
+        health_items = visible_health_items(labels, player_x=x, player_y=y)
+        nearest_item = health_items[0] if health_items else None
         heading_radians = math.radians(angle)
         route_bearing_radians = math.radians(route.bearing_degrees)
         route_error_radians = math.radians(
@@ -221,5 +292,7 @@ class EngineStateBuilder:
             nearest_enemy=nearest,
             visible_enemy_count=len(enemies),
             stuck_steps=self._stuck_steps,
+            nearest_health_item=nearest_item,
+            visible_health_item_count=len(health_items),
         )
 
