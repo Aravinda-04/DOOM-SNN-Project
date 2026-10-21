@@ -6,6 +6,20 @@ All commands should be executed from the project root (`e:\Side project`) in Pow
 
 ---
 
+## 0. Prerequisite: Asset Setup (Run Once After Cloning)
+
+Because `.wad` game files are large binaries (~144 MB total) excluded from Git, run the automated setup script once before testing:
+
+```powershell
+python setup_assets.py
+```
+This script will:
+1. Auto-download and unpack the official open-source `freedoom2.wad` (if missing).
+2. Procedurally compile the spatial jitter test WADs (`s10`, `s20`, `s30`).
+3. Verify that your local ViZDoom installation initializes FreeDoom2 MAP01 without error.
+
+---
+
 ## 1. Quick Start: Standard MAP01 Visual Runs
 
 In standard MAP01, monster placements are fixed according to original level geometry.

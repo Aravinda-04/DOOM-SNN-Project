@@ -63,6 +63,14 @@ def main():
         print(f"Error: {source_wad} not found.")
         return
 
+    # General jitter scenario (level01_jittered.cfg)
+    gen_wad = root / "freedoom2_jittered.wad"
+    gen_cfg = root / "scenarios" / "generated" / "level01_jittered.cfg"
+    count = create_jittered_wad(source_wad, gen_wad, seed=42, max_jitter=30)
+    create_cfg(gen_cfg, gen_wad)
+    print(f"Created freedoom2_jittered.wad ({count} monsters displaced) -> {gen_cfg}")
+
+    # Specific jittered scales
     for s in [10, 20, 30]:
         wad_name = f"freedoom2_jitter_s{s}.wad"
         wad_file = root / wad_name
