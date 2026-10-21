@@ -14,7 +14,9 @@ _vizdoom.ini
 /src/models/
 /reports/
 /data/demonstrations/
-/exports/
+/exports/*
+!/exports/*.pth
+!/exports/*.pt
 PROJECT_DESCRIPTION.md
 /scenarios/generated/
 .obsidian/
