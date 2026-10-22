@@ -46,6 +46,7 @@ class EngineStateSequenceDataset(Dataset):
         maximum_windows_per_episode: int = 64,
         counterfactual_ammo_probability: float = 0.0,
         recovery_window_repeats: int = 1,
+        perception_noise_probability: float = 0.0,
     ):
         if sequence_length <= 0 or stride <= 0:
             raise ValueError("sequence_length and stride must be positive.")
@@ -53,6 +54,8 @@ class EngineStateSequenceDataset(Dataset):
             raise ValueError("maximum_windows_per_episode must be positive.")
         if not 0.0 <= counterfactual_ammo_probability <= 1.0:
             raise ValueError("counterfactual_ammo_probability must be in [0, 1].")
+        if not 0.0 <= perception_noise_probability <= 1.0:
+            raise ValueError("perception_noise_probability must be in [0, 1].")
         if recovery_window_repeats <= 0:
             raise ValueError("recovery_window_repeats must be positive.")
         self.dataset_dir = Path(dataset_dir).expanduser().resolve()
@@ -60,6 +63,7 @@ class EngineStateSequenceDataset(Dataset):
         self.counterfactual_ammo_probability = float(
             counterfactual_ammo_probability
         )
+        self.perception_noise_probability = float(perception_noise_probability)
         self._episodes: list[dict] = []
         self._windows: list[tuple[int, int]] = []
         for entry in entries:
@@ -163,6 +167,44 @@ class EngineStateSequenceDataset(Dataset):
                 targets[timestep, 0] = 0 if abs(error) > 12.0 else 1
                 targets[timestep, 1] = 1 if error > 4.0 else 2 if error < -4.0 else 0
                 targets[timestep, 2] = 0
+
+        # Perception noise injection for Stage 2 Vision Bridge robustness
+        if self.perception_noise_probability > 0.0:
+            p_threshold = int(round(self.perception_noise_probability * 10_000))
+            apply_noise = ((index * 1664525 + 1013904223) % 10_000) < p_threshold
+            if apply_noise:
+                rng = np.random.default_rng((index + start) & 0xFFFFFFFF)
+
+                # 1. Subtle distance & screen-X jitter (simulating depth/spatial variance)
+                for dist_feat in ("enemy_distance", "route_distance"):
+                    idx = FEATURE_INDEX[dist_feat]
+                    noise = rng.normal(0.0, 0.04, size=features.shape[0]).astype(np.float32)
+                    features[:, idx] = np.clip(features[:, idx] + noise, 0.0, 1.0)
+
+                scr_idx = FEATURE_INDEX["enemy_screen_x"]
+                features[:, scr_idx] = np.clip(
+                    features[:, scr_idx] + rng.normal(0.0, 0.03, size=features.shape[0]).astype(np.float32),
+                    0.0, 1.0,
+                )
+
+                # 2. Perception Dropout: simulate CNN single-step/two-step flicker during combat
+                enemy_vis_idx = FEATURE_INDEX["enemy_visible"]
+                vis_steps = np.flatnonzero(features[:, enemy_vis_idx] > 0.5)
+                if len(vis_steps) > 4:
+                    drop_start = int(rng.choice(vis_steps[:-2]))
+                    drop_len = int(rng.integers(1, 3))
+                    for t in range(drop_start, min(drop_start + drop_len, len(features))):
+                        features[t, enemy_vis_idx] = 0.0
+                        for f_name in (
+                            "enemy_distance",
+                            "enemy_bearing_sin",
+                            "enemy_bearing_cos",
+                            "enemy_screen_x",
+                            "enemy_screen_area",
+                            "enemy_in_firing_cone",
+                        ):
+                            validity[t, FEATURE_INDEX[f_name]] = 0.0
+
         inputs = np.concatenate((features, validity), axis=1).astype(np.float32)
         return {
             "inputs": torch.from_numpy(inputs),

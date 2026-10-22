@@ -224,6 +224,18 @@ def parse_args() -> argparse.Namespace:
         default=4,
         help="Internal simulation steps per frame for the SNN architecture.",
     )
+    parser.add_argument(
+        "--perception-noise-probability",
+        type=float,
+        default=0.0,
+        help="Probability of injecting perception noise/dropout during training.",
+    )
+    parser.add_argument(
+        "--export-path",
+        type=Path,
+        default=None,
+        help="Optional path to export best model weights upon completion.",
+    )
     return parser.parse_args()
 
 
@@ -265,6 +277,7 @@ def main() -> None:
         maximum_windows_per_episode=args.maximum_windows_per_episode,
         counterfactual_ammo_probability=args.counterfactual_ammo_probability,
         recovery_window_repeats=args.recovery_window_repeats,
+        perception_noise_probability=args.perception_noise_probability,
     )
     validation_dataset = EngineStateSequenceDataset(
         dataset_dir,
@@ -356,10 +369,11 @@ def main() -> None:
         raise FileExistsError(f"Run already exists: {run_id}")
     model_dir.mkdir(parents=True, exist_ok=True)
     run_dir.mkdir(parents=True, exist_ok=True)
-    config = vars(args).copy()
+    config = {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()}
     config["dataset_dir"] = str(dataset_dir)
     config["route_data"] = str(args.route_data.expanduser().resolve())
     config["resume"] = None if args.resume is None else str(args.resume)
+    config["export_path"] = None if args.export_path is None else str(args.export_path)
     config["engine_state_contract_hash"] = ENGINE_STATE_CONTRACT_HASH
     config["input_size"] = input_size
     (model_dir / "config.json").write_text(json.dumps(config, indent=2), encoding="utf-8")
@@ -377,10 +391,12 @@ def main() -> None:
         optimizer.load_state_dict(payload["optimizer_state_dict"])
         for parameter_group in optimizer.param_groups:
             parameter_group["lr"] = args.learning_rate
-        start_epoch = int(payload["epoch"]) + 1
         if args.resume.expanduser().resolve().parent == model_dir:
+            start_epoch = int(payload["epoch"]) + 1
             best_score = float(payload.get("best_score", -math.inf))
             best_completion_rate = float(payload.get("best_completion_rate", 0.0))
+        else:
+            start_epoch = 0
 
     def save(path: Path, epoch: int, metrics: dict, score: float) -> None:
         torch.save(
@@ -503,6 +519,12 @@ def main() -> None:
     print(f"Best unshielded completion : {best_completion_rate:.1%}")
     print(f"Autonomy gate              : {'PASSED' if gate_passed else 'FAILED'}")
     print(f"Best checkpoint   : {model_dir / 'best.pth'}")
+    if args.export_path is not None and (model_dir / "best.pth").exists():
+        import shutil
+        export_dest = Path(args.export_path).expanduser().resolve()
+        export_dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(model_dir / "best.pth", export_dest)
+        print(f"Exported robust policy to {export_dest}")
     if not gate_passed:
         raise SystemExit(2)
 
