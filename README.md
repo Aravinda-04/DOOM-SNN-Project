@@ -78,7 +78,7 @@ flowchart TD
         CFG --> ENV["ViZDoom Engine State"]
         CLEAR --> ROUTE["Map01Route (Target, Distance, Bearing)"]
         ENV --> PERC["EngineStateBuilder (Labels + Diagnostics)"]
-        PERC --> OBS["Feature Vector (16D Features + 16D Validity)"]
+        PERC --> OBS["Feature Vector (38D Features + 38D Validity = 76D Input)"]
     end
 
     subgraph S4["4. Tactical Survival Arbitration"]
@@ -134,15 +134,17 @@ flowchart TD
 ---
 
 ### Phase 3: Observation & Engine-State Perception
-* **Tool**: `src/engine_state_observation.py` (`EngineStateBuilder`)
+* **Tool**: `src/engine_state_observation.py` (`EngineStateBuilder`), `src/engine_state_config.py`
 * **Mechanism**:
-  Constructs a normalized, model-agnostic feature vector pairing continuous engine measurements with binary validity flags:
-  * **Route Deltas**: Euclidean distance to current waypoint ($d / 1024.0$), relative bearing error normalized to $[-1, 1]$.
-  * **Player Kinematics**: Normalized player velocity, current heading angle, health ($h / 100.0$), ammunition count ($a / 50.0$).
+  Constructs a normalized, model-agnostic feature vector pairing 38 continuous engine measurements with 38 binary validity flags (76-dimensional input vector):
+  * **Spatial Kinematics**: Normalized coordinates $(x, y)$, heading unit vector $(\sin \theta, \cos \theta)$, 1-tick velocity deltas $(\Delta x, \Delta y)$, and angular velocity $(\sin \Delta\theta, \cos \Delta\theta)$.
+  * **Vitals & Game Progress**: Health ($h / 100.0$), armor ($r / 200.0$), bullet ammo ($b / 200.0$), shotgun shells ($s / 50.0$), kill count, item pickups, episode time fraction, and stuck fraction.
   * **Label Buffer Parsing**:
-    * `visible_enemies`: Scans on-screen object labels for active hostiles (`zombieman`, `shotgunguy`, `imp`, `demon`, etc.), extracting distance, horizontal screen angle, and bounding-box screen area.
+    * `visible_enemies`: Scans on-screen object labels for active hostiles (`zombieman`, `shotgunguy`, `imp`, `demon`, etc.), extracting distance, bearing angle, horizontal screen offset, bounding-box screen area, and firing cone alignment.
     * `visible_health_items`: Scans for consumable health pickups (`medikit`, `stimpack`, `healthbonus`), tracking 2D map positions and priority-weighted distances.
-  * **Anti-Oscillation Metrics**: Tracks consecutive stuck steps where the agent's displacement $< 2.0$ units/tick.
+  * **Route Deltas**: Euclidean distance to current waypoint ($d / 512.0$), waypoint bearing, heading error angle, route progress fraction, off-track alert, and interaction triggers.
+  * **Proprioception**: One-hot feedback of the actions executed on the previous tick.
+  * **Validity Flags**: 38 boolean masks indicating active vs inactive features (e.g., masking enemy fields when no hostiles are visible).
 
 ---
 
@@ -168,7 +170,8 @@ flowchart TD
     $$U[t] = \beta U[t-1] + W X[t] - S[t-1] V_{\text{th}}$$
     $$S[t] = \Theta(U[t] - V_{\text{th}})$$
     with membrane decay $\beta = 0.9$, threshold $V_{\text{th}} = 1.0$, and surrogate gradient using the fast-sigmoid slope.
-  * **Temporal Integration**: Spiking potentials are integrated over multi-step temporal windows ($T=2$), accumulating post-synaptic currents into linear factorized readouts.
+  * **Input & Hidden Dimensions**: LayerNorm with linear projection from the 76-dimensional input vector to 128 hidden LIF units.
+  * **Temporal Micro-Steps**: Simulates $T=4$ internal spiking micro-steps per environment frame. Recurrent spikes loop through `Linear(128, 128)`, allowing membrane potentials to bridge temporal gaps without LSTM gates.
   * **Sequence Windowed Training**: Trained using Backpropagation Through Time (BPTT) over sliced sequence windows (`sequence_length=32`, `stride=16`). Hidden LIF membrane states are carried forward across consecutive temporal chunks to preserve recurrent momentum.
   * **Factorized Multi-Task Loss**:
     $$\mathcal{L} = \mathcal{L}_{\text{locomotion}}^{\text{CE}} + \mathcal{L}_{\text{turning}}^{\text{CE}} + \mathcal{L}_{\text{attack}}^{\text{BCE}} + \mathcal{L}_{\text{use}}^{\text{BCE}}$$
@@ -195,6 +198,100 @@ flowchart TD
   2. **Suite 2: Spatial Jitter WADs**: Re-evaluates policies on procedurally altered maps where monsters have been displaced by up to 30 units (**66.7% Pass Rate**).
   3. **Suite 3: Altered-Start Perturbations**: Forces 6–8 ticks of uncommanded lateral or backward movement at level spawn to verify path acquisition from unexpected initial headings (**66.7% Pass Rate**).
   4. **Diagnostic Telemetry**: Exports comprehensive JSON and Markdown reports with displacement, ammunition consumption, shot accuracy, and kill ratios.
+
+---
+
+## End-to-End Data Pipeline: From Game Engine to Spiking Action
+
+The complete dataflow per simulation tick (35 FPS native Doom rate) operates as follows:
+
+```mermaid
+flowchart TD
+    subgraph ViZDoom ["1. ViZDoom Game Engine (FreeDoom2 MAP01)"]
+        RawState["Raw State: Game Variables, Player (X,Y,Angle), Screen & Label Buffer"]
+    end
+
+    subgraph FeatureEngineering ["2. Feature Engineering (engine_state_observation.py)"]
+        Extract["Extract 38 Features:\n- Kinematics & Position (8)\n- Vitals & Progress (8)\n- Enemy Perception (8)\n- Route Navigation (10)\n- Proprioception / Prev Actions (8)"]
+        Mask["Compute 38 Validity Masks\n(e.g., enemy fields = 0 if no enemy in sight)"]
+        Concat["Concatenate: 38 Features + 38 Masks\n-> 76-Dimensional Input Vector"]
+    end
+
+    subgraph SNNBrain ["3. Spiking Neural Network Brain (engine_state_policy.py)"]
+        Enc["Encoder: LayerNorm(76) -> Linear(76, 128)"]
+        LIF["Recurrent LIF Core (snnTorch, beta=0.9)\nRuns 4 Internal Micro-Steps per Frame (T=4)\nMembrane Potentials Bridge Temporal Gaps"]
+        Heads["4 Factorized Output Heads:\n- Locomotion (5-way)\n- Steering (3-way)\n- Combat / Attack (1-way)\n- Interaction / Use (1-way)"]
+    end
+
+    subgraph TacticalArbitration ["4. Post-Processing & Tactical Refinements"]
+        Tactics["- Health Detour Arbitrator (Divert to Medikit if HP <= 50 or <= 25)\n- Pellet Spread Invariant (Fire within 15° cone & <= 750 dist)\n- Anti-Wedging Reflex (Reverse if stuck >= 12 ticks)"]
+    end
+
+    subgraph MotorExecution ["5. ViZDoom Motor Execution"]
+        Buttons["Compose 8 ViZDoom Buttons:\n[MOVE_FWD, MOVE_BACK, STRAFE_L, STRAFE_R,\nTURN_L, TURN_R, ATTACK, USE]"]
+    end
+
+    RawState --> Extract
+    Extract --> Concat
+    Mask --> Concat
+    Concat --> Enc
+    Enc --> LIF
+    LIF --> Heads
+    Heads --> Tactics
+    Tactics --> Buttons
+    Buttons -->|"game.make_action()"| RawState
+```
+
+### 1. ViZDoom Engine Outputs (Per Frame)
+At every 35 Hz tick, ViZDoom exposes:
+* **Game Variables**: Player health, armor, ammunition reserves (bullets `ammo2`, shotgun shells `ammo3`), kill count, item count, and level time.
+* **Player Physics State**: Exact floating-point world coordinates $(x, y, z)$ and continuous yaw orientation $\theta \in [0^\circ, 360^\circ)$.
+* **Label / Actor Buffer**: Ground-truth object segmentation identifying active actors within the player's frustum, their 2D screen bounding boxes, 3D world coordinates, and class tokens (`zombieman`, `shotgunguy`, `imp`, `medikit`, `stimpack`, etc.).
+
+### 2. Feature Extraction & Engineering (The 76-D Input Vector)
+Defined in `src/engine_state_config.py` and `src/engine_state_observation.py`, the observation engine transforms raw telemetry into **38 normalized continuous features** paired with **38 boolean validity flags**, producing a **76-dimensional input vector**:
+
+| Category | Dimension | Features | Normalization / Encoding |
+| :--- | :---: | :--- | :--- |
+| **Spatial & Kinematics** | 8 | `position_x`, `position_y`, `heading_sin`, `heading_cos`, `delta_x`, `delta_y`, `delta_angle_sin`, `delta_angle_cos` | $(x, y)$ min-max scaled across MAP01 geometry; heading decomposed into unit sine/cosine; velocity clamped and scaled by 64 units. |
+| **Vitals & Progress** | 8 | `health`, `armor`, `ammo_bullets`, `ammo_shells`, `kill_count`, `item_count`, `time_fraction`, `stuck_fraction` | Health scaled by $1/100$, armor by $1/200$, ammo by capacity, stuck steps scaled by anti-wedging window. |
+| **Enemy Perception** | 8 | `enemy_visible`, `enemy_count`, `enemy_distance`, `enemy_bearing_sin`, `enemy_bearing_cos`, `enemy_screen_x`, `enemy_screen_area`, `enemy_in_firing_cone` | Nearest enemy distance scaled by $1/1024$; horizontal screen coordinate normalized $[-1, 1]$; firing cone binary flag asserted when alignment $\le 5^\circ$. |
+| **Route Navigation** | 10 | `route_dx`, `route_dy`, `route_distance`, `route_bearing_sin`, `route_bearing_cos`, `route_heading_error_sin`, `route_heading_error_cos`, `route_progress`, `route_off_track`, `use_recommended` | Waypoint delta vector scaled by $1/512$; relative bearing and heading error angles in sine/cosine; milestone progress $[0.0, 1.0]$; interaction triggers. |
+| **Proprioception** | 8 | `previous_forward`, `previous_backward`, `previous_strafe_left`, `previous_strafe_right`, `previous_turn_left`, `previous_turn_right`, `previous_attack`, `previous_use` | One-hot binary indicator of the action executed on the previous frame, providing the network with recurrent motor self-awareness. |
+| **Validity Masks** | 38 | `validity[0..37]` | Binary indicators ($1.0$ valid, $0.0$ invalid). For example, when no enemy is visible, enemy-specific features are flagged as invalid ($0.0$). |
+
+$$\mathbf{x}_{\text{input}} = \left[ \mathbf{f}_{\text{values}} \,(38) \,\|\, \mathbf{f}_{\text{validity}} \,(38) \right] \in \mathbb{R}^{76}$$
+
+### 3. Inside the Recurrent Spiking Neural Network
+Defined in `src/networks/engine_state_policy.py` (`EngineStateSpikingPolicy`):
+* **Input LayerNorm & Dense Projection**:
+  $$I_{\text{in}} = \mathbf{W}_{\text{enc}} \cdot \text{LayerNorm}(\mathbf{x}_{\text{input}}) + \mathbf{b}_{\text{enc}} \quad (\mathbf{W}_{\text{enc}} \in \mathbb{R}^{128 \times 76})$$
+* **Recurrent LIF Core (`snnTorch`)**:
+  * Simulates $T=4$ internal temporal micro-steps per environment frame.
+  * For each micro-step $\tau \in \{1, 2, 3, 4\}$:
+    $$I_{\text{rec}}[\tau] = I_{\text{in}} + \mathbf{W}_{\text{rec}} \mathbf{S}[\tau-1]$$
+    $$U[\tau] = \beta U[\tau-1] + I_{\text{rec}}[\tau] - \mathbf{S}[\tau-1] V_{\text{th}}$$
+    $$\mathbf{S}[\tau] = \Theta(U[\tau] - V_{\text{th}})$$
+  * Decay rate $\beta = 0.9$, threshold $V_{\text{th}} = 1.0$, surrogate gradient using fast-sigmoid.
+  * **Memory Across Frames**: The hidden spike train $\mathbf{S}$ and membrane potential $\mathbf{U}$ persist across environment steps, functioning as a continuous internal memory without classical LSTM gates.
+* **Factorized Linear Output Heads**:
+  Hidden spikes $\mathbf{S}$ are projected into four independent heads:
+  * **Locomotion**: `Linear(128, 5)` $\rightarrow$ `[NONE, FORWARD, BACKWARD, STRAFE_LEFT, STRAFE_RIGHT]`
+  * **Turning**: `Linear(128, 3)` $\rightarrow$ `[NONE, TURN_LEFT, TURN_RIGHT]`
+  * **Attack**: `Linear(128, 1)` $\rightarrow$ combat firing logit
+  * **Use**: `Linear(128, 1)` $\rightarrow$ door/switch activation logit
+  * Membrane potentials accumulate linearly over the 4 micro-steps (`reset_mechanism="none"`) to yield final action logits.
+
+### 4. Tactical Arbitration & Control Invariants
+The raw network logits pass through deterministic tactical arbitrators before hitting the engine:
+1. **Health Detour Planning**: If player health drops below $50\text{ HP}$ (or $\le 25\text{ HP}$ under emergency rules), `HealthTacticsArbitrator` injects a temporary waypoint toward the highest-priority safe Medikit/Stimpack, bypassing the speedrun route until collected.
+2. **Shotgun Pellet Invariant**: Weapon firing is asserted when a hostile is within $750$ map units and aligned within a $15^\circ$ cone matching the shotgun pellet spread.
+3. **Anti-Wedging Reflex**: If collision geometry halts displacement for $\ge 12$ ticks, the controller forces a reverse-right unwedge action, preventing doorway pinches.
+
+### 5. Motor Execution in ViZDoom
+The resolved `FactorizedAction` is transformed into ViZDoom's 8-button binary array:
+$$\begin{bmatrix} \text{MOVE\_FORWARD}, \text{MOVE\_BACKWARD}, \text{MOVE\_LEFT}, \text{MOVE\_RIGHT}, \text{TURN\_LEFT}, \text{TURN\_RIGHT}, \text{ATTACK}, \text{USE} \end{bmatrix}$$
+Passed into `game.make_action()`, the engine simulates 1 tick and advances the game state, completing the cycle.
 
 ---
 
@@ -240,7 +337,8 @@ pytest -q
 | :--- | :--- |
 | **Neural Architecture** | Recurrent Spiking Neural Network (`EngineStateSpikingPolicy`) |
 | **Neuron Model** | Leaky Integrate-and-Fire (`snn.Leaky`, $\beta=0.9$, fast-sigmoid surrogate) |
-| **Input Dimensionality** | 32 continuous features (16 normalized signals + 16 validity flags) |
+| **Input Dimensionality** | 76 continuous signals (38 normalized features + 38 boolean validity flags) |
+| **SNN Micro-Steps** | 4 internal simulation steps per tick ($T=4$) |
 | **Output Space** | Factorized: Locomotion (5), Turning (3), Attack (1), Use (1) |
 | **Temporal Horizon** | Sequence length 32, Stride 16, carried recurrent hidden states |
 | **Target Game** | FreeDoom2 MAP01 (ViZDoom engine, 35 ticks/sec) |
