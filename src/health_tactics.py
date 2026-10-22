@@ -95,11 +95,13 @@ class HealthTacticsArbitrator:
             self._pursuit_ticks = 0
             return None
 
-        # 2. Combat threat check: don't detour if an enemy is point-blank in front of us
+        # 2. Combat threat check:
+        # At critical health (<= 25 HP), survival requires healing; only point-blank threats (<120) block detours
+        threat_dist = 120.0 if player_health <= 25.0 else self.combat_threat_distance
         if nearest_enemy is not None:
             enemy_error = abs(angle_delta_degrees(nearest_enemy.bearing_degrees, player_angle))
             if (
-                nearest_enemy.distance < self.combat_threat_distance
+                nearest_enemy.distance < threat_dist
                 and enemy_error <= self.combat_threat_angle
             ):
                 # Combat flinching takes precedence

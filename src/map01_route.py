@@ -148,7 +148,16 @@ class Map01Route:
         keep = np.concatenate(
             ([True], np.linalg.norm(np.diff(sparse, axis=0), axis=1) > 1.0)
         )
-        return cls(sparse[keep], source_sha256=reference["sha256"])
+        points = list(sparse[keep])
+        # Doorway corner clearance: avoid clipping north doorframe at (1760, -772)
+        refined = []
+        for p in points:
+            if 1820.0 <= p[0] <= 1880.0 and -810.0 <= p[1] <= -780.0:
+                refined.append(np.asarray([1840.0, -830.0], dtype=np.float32))
+                refined.append(np.asarray([1775.0, -835.0], dtype=np.float32))
+            else:
+                refined.append(p)
+        return cls(np.asarray(refined, dtype=np.float32), source_sha256=reference["sha256"])
 
     def context(
         self,

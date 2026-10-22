@@ -75,6 +75,8 @@ def predicted_action(
     route: RouteContext | None = None,
     ammunition: float | None = None,
     player_angle: float | None = None,
+    step: int = 0,
+    weapon_cooldown: int = 0,
 ) -> FactorizedAction:
     """Decode policy heads and enforce state-dependent control invariants."""
     action = FactorizedAction(
@@ -228,6 +230,7 @@ def evaluate_policy(
     total_reward = 0.0
     attack_cooldown = 0
     attack_commands = 0
+    shotgun_cooldown_ticks = 0
     ammo_consumed = 0.0
     total_displacement = 0.0
     stuck_events = 0
@@ -268,7 +271,9 @@ def evaluate_policy(
             current_ammo = float(info["ammo2"] + info["ammo3"])
             if previous_ammo is not None and current_ammo < previous_ammo:
                 ammo_consumed += (previous_ammo - current_ammo)
+                shotgun_cooldown_ticks = 28
             previous_ammo = current_ammo
+            shotgun_cooldown_ticks = max(0, shotgun_cooldown_ticks - 1)
 
             current_pos = (float(info["position_x"]), float(info["position_y"]))
             if previous_pos is not None:
@@ -347,6 +352,8 @@ def evaluate_policy(
                 route=context,
                 ammunition=float(info["ammo2"] + info["ammo3"]),
                 player_angle=float(info["angle"]),
+                step=steps,
+                weapon_cooldown=shotgun_cooldown_ticks,
             )
             attack_cooldown = max(0, attack_cooldown - 1)
             if action.attack:
