@@ -267,6 +267,20 @@ def run_vision_bridged_episode(
                 weapon_cooldown=shotgun_cooldown_ticks,
             )
 
+            # Shotgun ammo conservation gate: suppress firing when target is distant (>650 units) or alignment confidence is low
+            if action.attack:
+                if (
+                    nearest_enemy is None
+                    or nearest_enemy.distance > 650.0
+                    or pred["enemy_in_firing_cone_prob"].item() < 0.65
+                ):
+                    action = FactorizedAction(
+                        locomotion=action.locomotion,
+                        turning=action.turning,
+                        attack=False,
+                        use=action.use,
+                    )
+
             # Anti-wedging reflex
             if stuck_steps >= 12:
                 action = FactorizedAction(

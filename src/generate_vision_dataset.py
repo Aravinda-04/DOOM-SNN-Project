@@ -7,6 +7,7 @@ import math
 import random
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Sequence
 
 import numpy as np
 import torch
@@ -52,6 +53,7 @@ def generate_vision_episode(
     device: torch.device,
     episode_timeout: int | None = 2100,
     health_arbitrator: HealthTacticsArbitrator | None = None,
+    config_file: Path | None = None,
 ) -> tuple[dict, dict[str, np.ndarray]]:
     """Simulate one episode capturing aligned (frames, features, validity, targets)."""
     builder = EngineStateBuilder()
@@ -76,6 +78,7 @@ def generate_vision_episode(
     step_count = 0
 
     with DoomLevelEnvironment(
+        config_file=config_file,
         render=False,
         seed=seed,
         episode_timeout=episode_timeout,
@@ -172,11 +175,13 @@ def generate_vision_episode(
 
         final = env.diagnostics()
 
+    scenario_name = config_file.stem if config_file is not None else "level01"
     metadata = {
         "schema_version": VISION_SCHEMA_VERSION,
         "engine_state_contract_version": ENGINE_STATE_CONTRACT_VERSION,
         "engine_state_contract_hash": ENGINE_STATE_CONTRACT_HASH,
         "seed": seed,
+        "scenario": scenario_name,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "completed": bool(final["exit_triggered"]),
         "terminal_reason": str(final["terminal_reason"]),
@@ -206,6 +211,7 @@ def generate_vision_dataset(
     checkpoint_path: Path,
     route_data_dir: Path = DEFAULT_ROUTE_DATA,
     seeds: tuple[int, ...] = PASSING_SEEDS,
+    config_paths: Sequence[Path | None] | None = None,
     device: str = "auto",
 ) -> None:
     output_dir = Path(output_dir).expanduser().resolve()
@@ -220,44 +226,55 @@ def generate_vision_dataset(
     route = Map01Route.from_demonstrations(route_data_dir)
     health_arbitrator = HealthTacticsArbitrator()
 
-    print(f"Generating vision dataset into {output_dir} across {len(seeds)} seeds...")
+    active_configs = list(config_paths) if config_paths else [None]
+    total_runs = len(active_configs) * len(seeds)
+    print(
+        f"Generating vision dataset into {output_dir} across "
+        f"{len(active_configs)} configs and {len(seeds)} seeds ({total_runs} episodes)..."
+    )
     total_steps = 0
     saved_episodes = 0
+    run_idx = 0
 
-    for i, seed in enumerate(seeds):
-        print(f"[{i+1}/{len(seeds)}] Simulating seed {seed}...", end="", flush=True)
-        metadata, arrays = generate_vision_episode(
-            route=route,
-            seed=seed,
-            model=model,
-            device=resolved_device,
-            health_arbitrator=health_arbitrator,
-        )
-        completed = metadata["completed"]
-        steps = metadata["steps"]
-        kills = metadata["kills"]
-        print(f" done! (steps={steps}, kills={kills:.0f}, completed={completed})")
+    for cfg in active_configs:
+        cfg_name = cfg.stem if cfg is not None else "map01"
+        for seed in seeds:
+            run_idx += 1
+            print(f"[{run_idx}/{total_runs}] Simulating config={cfg_name} seed={seed}...", end="", flush=True)
+            metadata, arrays = generate_vision_episode(
+                route=route,
+                seed=seed,
+                model=model,
+                device=resolved_device,
+                health_arbitrator=health_arbitrator,
+                config_file=cfg,
+            )
+            completed = metadata["completed"]
+            steps = metadata["steps"]
+            kills = metadata["kills"]
+            print(f" done! (steps={steps}, kills={kills:.0f}, completed={completed})")
 
-        if completed or steps >= 400:
-            episode_id = f"vision_map01_seed_{seed:04d}"
-            filename = f"{episode_id}.npz"
-            filepath = output_dir / filename
-            if filepath.exists():
-                filepath.unlink()
+            if completed or steps >= 400:
+                episode_id = f"vision_{cfg_name}_seed_{seed:04d}"
+                filename = f"{episode_id}.npz"
+                filepath = output_dir / filename
+                if filepath.exists():
+                    filepath.unlink()
 
-            sha256 = save_vision_sequence(filepath, metadata=metadata, **arrays)
-            manifest_entry = {
-                "episode_id": episode_id,
-                "file": filename,
-                "seed": seed,
-                "steps": steps,
-                "completed": completed,
-                "kills": kills,
-                "sha256": sha256,
-            }
-            append_vision_manifest_entry(output_dir, manifest_entry)
-            saved_episodes += 1
-            total_steps += steps
+                sha256 = save_vision_sequence(filepath, metadata=metadata, **arrays)
+                manifest_entry = {
+                    "episode_id": episode_id,
+                    "file": filename,
+                    "scenario": cfg_name,
+                    "seed": seed,
+                    "steps": steps,
+                    "completed": completed,
+                    "kills": kills,
+                    "sha256": sha256,
+                }
+                append_vision_manifest_entry(output_dir, manifest_entry)
+                saved_episodes += 1
+                total_steps += steps
 
     print(f"\nSuccessfully generated {saved_episodes} vision episodes ({total_steps} transitions total)!")
 
@@ -268,6 +285,13 @@ def main() -> None:
     parser.add_argument("--checkpoint", type=Path, default=DEFAULT_CHECKPOINT)
     parser.add_argument("--route-dir", type=Path, default=DEFAULT_ROUTE_DATA)
     parser.add_argument("--seeds", type=int, nargs="+", default=list(PASSING_SEEDS))
+    parser.add_argument(
+        "--configs",
+        type=Path,
+        nargs="*",
+        default=None,
+        help="Optional list of ViZDoom scenario CFG paths (defaults to standard scenarios/level01.cfg).",
+    )
     parser.add_argument("--device", type=str, default="auto")
     args = parser.parse_args()
 
@@ -276,6 +300,7 @@ def main() -> None:
         checkpoint_path=args.checkpoint,
         route_data_dir=args.route_dir,
         seeds=tuple(args.seeds),
+        config_paths=args.configs,
         device=args.device,
     )
 
