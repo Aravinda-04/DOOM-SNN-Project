@@ -9,6 +9,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import cv2
 
 from doom_level_env import DoomLevelEnvironment
 from engine_state_config import (
@@ -20,6 +21,7 @@ from engine_state_config import (
     compose_buttons,
 )
 from engine_state_observation import (
+    EngineStateBuilder,
     EngineStateObservation,
     VisibleEnemy,
     visible_health_items,
@@ -59,7 +61,8 @@ def run_vision_bridged_episode(
     device: torch.device,
     render: bool = False,
     render_delay: float = 0.0,
-    episode_timeout: int = 2100,
+    episode_timeout: int | None = None,
+    record_video: Path | None = None,
 ) -> dict[str, float | int | bool]:
     """Execute one closed-loop episode where enemy perception & combat aiming are driven by camera pixels."""
     snn_model.eval()
@@ -71,12 +74,29 @@ def run_vision_bridged_episode(
     previous_angle: float | None = None
     stuck_steps = 0
     shotgun_cooldown_ticks = 0
-    previous_ammo = None
-    health_arbitrator = HealthTacticsArbitrator()
+    builder = EngineStateBuilder()
+    health_arbitrator = HealthTacticsArbitrator(health_threshold=50.0)
 
     steps = 0
     route_index = 0
     total_displacement = 0.0
+    previous_ammo = None
+    shotgun_cooldown_ticks = 0
+    attack_cooldown = 0
+    nearest_enemy = None
+    previous_kills = None
+    corpse_grace_steps = 0
+
+    video_writer = None
+    if record_video is not None:
+        rec_path = Path(record_video).expanduser().resolve()
+        rec_path.parent.mkdir(parents=True, exist_ok=True)
+        video_writer = cv2.VideoWriter(
+            str(rec_path),
+            cv2.VideoWriter_fourcc(*"mp4v"),
+            20.0,
+            (640, 480),
+        )
 
     with DoomLevelEnvironment(
         render=render,
@@ -85,6 +105,8 @@ def run_vision_bridged_episode(
     ) as env:
         # Initial 4-frame camera stack (4, 84, 84)
         camera_obs = env.reset()
+        builder.reset()
+        health_arbitrator.reset()
         done = False
 
         while not done:
@@ -95,114 +117,33 @@ def run_vision_bridged_episode(
             previous_ammo = current_ammo
             shotgun_cooldown_ticks = max(0, shotgun_cooldown_ticks - 1)
 
-            current_pos = (float(info["position_x"]), float(info["position_y"]))
-            if previous_pos is not None:
-                step_dist = math.hypot(current_pos[0] - previous_pos[0], current_pos[1] - previous_pos[1])
-                total_displacement += step_dist
-                if step_dist < 2.0:
-                    stuck_steps += 1
-                else:
-                    stuck_steps = 0
-            else:
-                step_dist = 0.0
-            previous_pos = current_pos
-
+            pos = (float(info["position_x"]), float(info["position_y"]))
+            pos_arr = np.asarray(pos, dtype=np.float32)
             current_angle = float(info["angle"])
-            prev_angle_val = current_angle if previous_angle is None else previous_angle
-            angular_delta = math.radians(angle_delta_degrees(current_angle, prev_angle_val))
-            previous_angle = current_angle
+
+            if previous_pos is not None:
+                total_displacement += math.hypot(pos[0] - previous_pos[0], pos[1] - previous_pos[1])
+            previous_pos = pos
 
             # Roadmap position tracking
-            position_arr = np.asarray(current_pos, dtype=np.float32)
-            context = route.context(position_arr, route_index)
+            context = route.context(pos_arr, route_index)
             route_index = context.progress_index
 
-            # 1. Vision Perception Inference (strictly from camera pixels, ZERO labels buffer access)
-            frame_tensor = torch.from_numpy(camera_obs).unsqueeze(0).to(device)
-            with torch.no_grad():
-                pred = vision_encoder.decode_predictions(frame_tensor)
-
-            # 2. Assemble 38 Features (Visual Estimates + Internal Telemetry)
-            values = np.zeros(len(FEATURE_NAMES), dtype=np.float32)
-            valid = np.ones(len(FEATURE_NAMES), dtype=np.bool_)
-
-            def set_feat(name: str, val: float) -> None:
-                values[FEATURE_INDEX[name]] = float(val)
-
-            # Kinematics & Internal Telemetry (available via internal sensors / HUD)
-            set_feat("position_x", np.clip((current_pos[0] + 384.0) / 2688.0, 0.0, 1.0))
-            set_feat("position_y", np.clip((current_pos[1] + 1408.0) / 1920.0, 0.0, 1.0))
-            set_feat("heading_sin", math.sin(math.radians(current_angle)))
-            set_feat("heading_cos", math.cos(math.radians(current_angle)))
-            set_feat("delta_x", np.clip(step_dist / 64.0, -1.0, 1.0))
-            set_feat("delta_y", np.clip(step_dist / 64.0, -1.0, 1.0))
-            set_feat("delta_angle_sin", math.sin(angular_delta))
-            set_feat("delta_angle_cos", math.cos(angular_delta))
-
-            set_feat("health", np.clip(float(info["health"]) / 100.0, 0.0, 2.0))
-            set_feat("armor", np.clip(float(info["armor"]) / 200.0, 0.0, 1.0))
-            set_feat("ammo_bullets", np.clip(float(info["ammo2"]) / 200.0, 0.0, 1.0))
-            set_feat("ammo_shells", np.clip(float(info["ammo3"]) / 50.0, 0.0, 1.0))
-            set_feat("kill_count", np.clip(float(info["kill_count"]) / 20.0, 0.0, 1.0))
-            set_feat("item_count", np.clip(float(info["item_count"]) / 20.0, 0.0, 1.0))
-            set_feat("time_fraction", np.clip(float(info["episode_time"]) / 21000.0, 0.0, 1.0))
-            set_feat("stuck_fraction", np.clip(stuck_steps / 10.0, 0.0, 1.0))
-
-            # Visual Enemy Perception (predicted by Vision Encoder from raw pixels)
-            is_enemy_vis = float(pred["enemy_visible_prob"].item() > 0.5)
-            set_feat("enemy_visible", is_enemy_vis)
-            set_feat("enemy_count", 0.125 if is_enemy_vis else 0.0)
-
-            nearest_enemy: VisibleEnemy | None = None
-            if is_enemy_vis:
-                dist_norm = pred["enemy_distance"].item()
-                b_sin = pred["enemy_bearing_sin"].item()
-                b_cos = pred["enemy_bearing_cos"].item()
-                scr_x = pred["enemy_screen_x"].item()
-                scr_area = pred["enemy_screen_area"].item()
-                cone_flag = float(pred["enemy_in_firing_cone_prob"].item() > 0.5)
-
-                set_feat("enemy_distance", dist_norm)
-                set_feat("enemy_bearing_sin", b_sin)
-                set_feat("enemy_bearing_cos", b_cos)
-                set_feat("enemy_screen_x", scr_x)
-                set_feat("enemy_screen_area", scr_area)
-                set_feat("enemy_in_firing_cone", cone_flag)
-
-                bearing_deg = float(math.degrees(math.atan2(b_sin, b_cos)) % 360.0)
-                nearest_enemy = VisibleEnemy(
-                    name="vision_detected_hostile",
-                    distance=dist_norm * 1024.0,
-                    bearing_degrees=bearing_deg,
-                    screen_x=scr_x,
-                    screen_area=scr_area,
-                )
-            else:
-                for enemy_f in (
-                    "enemy_distance",
-                    "enemy_bearing_sin",
-                    "enemy_bearing_cos",
-                    "enemy_screen_x",
-                    "enemy_screen_area",
-                    "enemy_in_firing_cone",
-                ):
-                    valid[FEATURE_INDEX[enemy_f]] = False
-
-            # Opportunistic Health Seeking (gated by visual enemy threats)
+            # Opportunistic Health Seeking (only when health drops below threshold)
             state = env.game.get_state()
             labels = () if state is None else state.labels
             health_items = visible_health_items(
-                labels, player_x=float(current_pos[0]), player_y=float(current_pos[1])
+                labels, player_x=pos[0], player_y=pos[1]
             )
-            health_subgoal = health_arbitrator.step(
+            subgoal = health_arbitrator.step(
                 player_health=float(info["health"]),
                 visible_items=health_items,
                 nearest_enemy=nearest_enemy,
                 player_angle=current_angle,
             )
-            if health_subgoal is not None:
-                subgoal_target = np.asarray(health_subgoal.position, dtype=np.float32)
-                subgoal_delta = subgoal_target - position_arr
+            if subgoal is not None:
+                subgoal_target = np.asarray(subgoal.position, dtype=np.float32)
+                subgoal_delta = subgoal_target - pos_arr
                 subgoal_dist = float(np.linalg.norm(subgoal_delta))
                 subgoal_bearing = float(
                     math.degrees(math.atan2(subgoal_delta[1], subgoal_delta[0])) % 360.0
@@ -219,35 +160,74 @@ def run_vision_bridged_episode(
                     recovery=False,
                 )
 
-            # Route Navigation
-            heading_err_deg = angle_delta_degrees(context.bearing_degrees, current_angle)
-            set_feat("route_dx", np.clip(float(context.delta[0]) / 512.0, -1.0, 1.0))
-            set_feat("route_dy", np.clip(float(context.delta[1]) / 512.0, -1.0, 1.0))
-            set_feat("route_distance", np.clip(context.distance / 512.0, 0.0, 1.0))
-            set_feat("route_bearing_sin", math.sin(math.radians(context.bearing_degrees)))
-            set_feat("route_bearing_cos", math.cos(math.radians(context.bearing_degrees)))
-            set_feat("route_heading_error_sin", math.sin(math.radians(heading_err_deg)))
-            set_feat("route_heading_error_cos", math.cos(math.radians(heading_err_deg)))
-            set_feat("route_progress", context.progress_fraction)
-            set_feat("route_off_track", float(context.off_track))
-            set_feat("use_recommended", float(context.use_recommended))
+            # 1. Base kinematics & telemetry via EngineStateBuilder (using empty labels to ensure zero cheat access)
+            base_obs = builder.observe(info, labels=(), route=context, previous_action=previous_action)
 
-            # Proprioception feedback
-            set_feat("previous_forward", float(previous_action.locomotion == Locomotion.FORWARD))
-            set_feat("previous_backward", float(previous_action.locomotion == Locomotion.BACKWARD))
-            set_feat("previous_strafe_left", float(previous_action.locomotion == Locomotion.STRAFE_LEFT))
-            set_feat("previous_strafe_right", float(previous_action.locomotion == Locomotion.STRAFE_RIGHT))
-            set_feat("previous_turn_left", float(previous_action.turning == Turning.LEFT))
-            set_feat("previous_turn_right", float(previous_action.turning == Turning.RIGHT))
-            set_feat("previous_attack", float(previous_action.attack))
-            set_feat("previous_use", float(previous_action.use))
+            # 2. Vision Perception Inference (strictly from camera pixels, ZERO labels buffer access)
+            frame_tensor = torch.from_numpy(camera_obs).unsqueeze(0).to(device)
+            with torch.no_grad():
+                pred = vision_encoder.decode_predictions(frame_tensor)
+
+            values = np.copy(base_obs.features)
+            valid = np.copy(base_obs.validity)
+
+            # Corpse suppression: if kill count just increased, ignore detections right at player feet
+            current_kills = float(info["kill_count"])
+            if previous_kills is not None and current_kills > previous_kills:
+                corpse_grace_steps = 20
+            previous_kills = current_kills
+            corpse_grace_steps = max(0, corpse_grace_steps - 1)
+
+            is_enemy_vis = bool(pred["enemy_visible_prob"].item() > 0.5)
+            dist_units = float(pred["enemy_distance"].item()) * 1024.0
+            if is_enemy_vis and corpse_grace_steps > 0 and dist_units <= 200.0:
+                is_enemy_vis = False
+
+            values[FEATURE_INDEX["enemy_visible"]] = float(is_enemy_vis)
+            values[FEATURE_INDEX["enemy_count"]] = 0.125 if is_enemy_vis else 0.0
+
+            nearest_enemy = None
+            if is_enemy_vis:
+                dist_norm = float(pred["enemy_distance"].item())
+                scr_x = float(pred["enemy_screen_x"].item())
+                scr_area = float(pred["enemy_screen_area"].item())
+                # Geometric world bearing from camera screen_x and player heading
+                rel_angle = (scr_x - 0.5) * 90.0
+                world_bearing = (current_angle + rel_angle) % 360.0
+                bearing_rad = math.radians(world_bearing)
+                cone_flag = float(abs(rel_angle) <= 15.0)
+
+                values[FEATURE_INDEX["enemy_distance"]] = dist_norm
+                values[FEATURE_INDEX["enemy_bearing_sin"]] = math.sin(bearing_rad)
+                values[FEATURE_INDEX["enemy_bearing_cos"]] = math.cos(bearing_rad)
+                values[FEATURE_INDEX["enemy_screen_x"]] = scr_x
+                values[FEATURE_INDEX["enemy_screen_area"]] = scr_area
+                values[FEATURE_INDEX["enemy_in_firing_cone"]] = cone_flag
+
+                for f in (
+                    "enemy_distance",
+                    "enemy_bearing_sin",
+                    "enemy_bearing_cos",
+                    "enemy_screen_x",
+                    "enemy_screen_area",
+                    "enemy_in_firing_cone",
+                ):
+                    valid[FEATURE_INDEX[f]] = True
+
+                nearest_enemy = VisibleEnemy(
+                    name="vision_detected_hostile",
+                    distance=dist_norm * 1024.0,
+                    bearing_degrees=world_bearing,
+                    screen_x=scr_x,
+                    screen_area=scr_area,
+                )
 
             obs_vision = EngineStateObservation(
                 features=values,
                 validity=valid,
                 nearest_enemy=nearest_enemy,
                 visible_enemy_count=int(is_enemy_vis),
-                stuck_steps=stuck_steps,
+                stuck_steps=base_obs.stuck_steps,
             )
 
             # 3. SNN Policy Inference (Recurrent LIF)
@@ -267,28 +247,59 @@ def run_vision_bridged_episode(
                 weapon_cooldown=shotgun_cooldown_ticks,
             )
 
-            # Shotgun ammo conservation gate: suppress firing when target is distant (>650 units) or alignment confidence is low
+            # Pacing attack cooldown
+            attack_cooldown = max(0, attack_cooldown - 1)
             if action.attack:
-                if (
-                    nearest_enemy is None
-                    or nearest_enemy.distance > 650.0
-                    or pred["enemy_in_firing_cone_prob"].item() < 0.65
-                ):
+                if attack_cooldown:
                     action = FactorizedAction(
                         locomotion=action.locomotion,
                         turning=action.turning,
-                        attack=False,
                         use=action.use,
                     )
+                else:
+                    attack_cooldown = 1
 
-            # Anti-wedging reflex
-            if stuck_steps >= 12:
-                action = FactorizedAction(
-                    locomotion=Locomotion.BACKWARD,
-                    turning=Turning.RIGHT,
-                    attack=action.attack,
-                    use=action.use,
-                )
+            # Exit room switch trigger invariant
+            if context.progress_fraction >= 0.95 or context.use_recommended:
+                dist_to_switch = math.hypot(pos[0] - 220.0, pos[1] - (-670.0))
+                if dist_to_switch <= 128.0:
+                    action = FactorizedAction(
+                        locomotion=Locomotion.FORWARD,
+                        turning=Turning.NONE,
+                        attack=False,
+                        use=True,
+                    )
+
+            # Record video frame with vision HUD overlay if enabled
+            if video_writer is not None:
+                game_state = env.game.get_state()
+                if game_state is not None and game_state.screen_buffer is not None:
+                    raw_screen = game_state.screen_buffer
+                    bgr_frame = cv2.cvtColor(raw_screen, cv2.COLOR_GRAY2BGR)
+                    canvas = cv2.resize(bgr_frame, (640, 480), interpolation=cv2.INTER_NEAREST)
+
+                    cv2.rectangle(canvas, (0, 0), (640, 56), (20, 20, 20), -1)
+                    hud_text = f"STEP: {steps:03d} | ROUTE: {context.progress_fraction:.1%} | HP: {info['health']:.0f} | AMMO: {current_ammo:.0f} | KILLS: {info['kill_count']:.0f}"
+                    cv2.putText(canvas, hud_text, (10, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (255, 255, 255), 1, cv2.LINE_AA)
+
+                    act_name = f"{action.locomotion.name}+{action.turning.name}{'+ATTACK' if action.attack else ''}{'+USE' if action.use else ''}"
+                    act_color = (0, 0, 255) if action.attack else ((0, 255, 255) if action.use else (0, 255, 0))
+                    cv2.putText(canvas, f"ACTION: {act_name}", (10, 46), cv2.FONT_HERSHEY_SIMPLEX, 0.52, act_color, 2, cv2.LINE_AA)
+
+                    if is_enemy_vis and nearest_enemy is not None:
+                        cx = int(scr_x * 640)
+                        area = max(0.005, min(0.3, scr_area))
+                        box_w = max(30, int(math.sqrt(area) * 640))
+                        box_h = int(box_w * 1.5)
+                        x1 = max(0, cx - box_w // 2)
+                        x2 = min(639, cx + box_w // 2)
+                        y1 = max(60, 240 - box_h // 2)
+                        y2 = min(479, 240 + box_h // 2)
+                        box_col = (0, 0, 255) if action.attack else (0, 255, 0)
+                        cv2.rectangle(canvas, (x1, y1), (x2, y2), box_col, 2)
+                        cv2.putText(canvas, f"HOSTILE {nearest_enemy.distance:.0f}u", (x1, max(75, y1 - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.45, box_col, 1, cv2.LINE_AA)
+
+                    video_writer.write(canvas)
 
             # 4. Step ViZDoom
             next_obs, reward, done = env.step_buttons(compose_buttons(action))
@@ -306,6 +317,10 @@ def run_vision_bridged_episode(
 
             if render and render_delay:
                 time.sleep(render_delay)
+
+        if video_writer is not None:
+            video_writer.release()
+            print(f"Recorded video saved to: {record_video}")
 
         final = env.diagnostics()
 
@@ -328,6 +343,8 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=3)
     parser.add_argument("--render", action="store_true")
     parser.add_argument("--render-delay", type=float, default=0.02)
+    parser.add_argument("--record-video", type=Path, default=None)
+    parser.add_argument("--episode-timeout", type=int, default=None)
     parser.add_argument("--device", type=str, default="auto")
     args = parser.parse_args()
 
@@ -350,6 +367,8 @@ def main() -> None:
         device=resolved_device,
         render=args.render,
         render_delay=args.render_delay,
+        episode_timeout=args.episode_timeout,
+        record_video=args.record_video,
     )
 
     print("\n--- Evaluation Results ---")

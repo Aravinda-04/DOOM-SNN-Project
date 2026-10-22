@@ -54,6 +54,11 @@ HEALTH_ITEM_TOKENS = {
     "stimpack": (10, 0.7),
     "healthbonus": (1, 0.2),
     "soulsphere": (100, 2.0),
+    "greenarmor": (100, 1.8),
+    "armorbonus": (1, 0.3),
+    "shotgun": (0, 1.5),
+    "shell": (4, 0.8),
+    "clip": (10, 0.5),
 }
 
 
