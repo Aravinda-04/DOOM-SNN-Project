@@ -19,9 +19,14 @@ from engine_state_config import (
     Turning,
     compose_buttons,
 )
-from engine_state_observation import EngineStateObservation, VisibleEnemy
+from engine_state_observation import (
+    EngineStateObservation,
+    VisibleEnemy,
+    visible_health_items,
+)
 from evaluate_engine_state_policy import load_policy, predicted_action
-from map01_route import Map01Route, angle_delta_degrees
+from health_tactics import HealthTacticsArbitrator
+from map01_route import Map01Route, RouteContext, angle_delta_degrees
 from networks.vision_encoder import VisionPerceptionEncoder
 from project_paths import MODEL_ROOT, PROJECT_ROOT
 from runtime_utils import resolve_device, set_random_seeds
@@ -67,6 +72,7 @@ def run_vision_bridged_episode(
     stuck_steps = 0
     shotgun_cooldown_ticks = 0
     previous_ammo = None
+    health_arbitrator = HealthTacticsArbitrator()
 
     steps = 0
     route_index = 0
@@ -182,6 +188,37 @@ def run_vision_bridged_episode(
                 ):
                     valid[FEATURE_INDEX[enemy_f]] = False
 
+            # Opportunistic Health Seeking (gated by visual enemy threats)
+            state = env.game.get_state()
+            labels = () if state is None else state.labels
+            health_items = visible_health_items(
+                labels, player_x=float(current_pos[0]), player_y=float(current_pos[1])
+            )
+            health_subgoal = health_arbitrator.step(
+                player_health=float(info["health"]),
+                visible_items=health_items,
+                nearest_enemy=nearest_enemy,
+                player_angle=current_angle,
+            )
+            if health_subgoal is not None:
+                subgoal_target = np.asarray(health_subgoal.position, dtype=np.float32)
+                subgoal_delta = subgoal_target - position_arr
+                subgoal_dist = float(np.linalg.norm(subgoal_delta))
+                subgoal_bearing = float(
+                    math.degrees(math.atan2(subgoal_delta[1], subgoal_delta[0])) % 360.0
+                )
+                context = RouteContext(
+                    progress_index=context.progress_index,
+                    progress_fraction=context.progress_fraction,
+                    target=subgoal_target,
+                    delta=subgoal_delta,
+                    distance=subgoal_dist,
+                    bearing_degrees=subgoal_bearing,
+                    off_track=context.off_track,
+                    use_recommended=False,
+                    recovery=False,
+                )
+
             # Route Navigation
             heading_err_deg = angle_delta_degrees(context.bearing_degrees, current_angle)
             set_feat("route_dx", np.clip(float(context.delta[0]) / 512.0, -1.0, 1.0))
@@ -244,6 +281,14 @@ def run_vision_bridged_episode(
             camera_obs = next_obs
             previous_action = action
             steps += 1
+
+            if steps % 30 == 0:
+                print(
+                    f"step={steps:3d} route={context.progress_fraction:.1%} "
+                    f"health={info['health']:.0f} ammo={current_ammo:.0f} kills={info['kill_count']:.0f} "
+                    f"pos=({info['position_x']:.0f},{info['position_y']:.0f}) "
+                    f"vis_enemy={int(is_enemy_vis)}"
+                )
 
             if render and render_delay:
                 time.sleep(render_delay)

@@ -14,6 +14,39 @@ from engine_state_config import FEATURE_INDEX, FEATURE_NAMES
 from vision_data_schema import load_vision_manifest, load_vision_sequence
 
 
+class VisionAugmentation:
+    """Fast, vectorized visual augmentations for 4-frame grayscale stacks."""
+
+    def __call__(self, frames: torch.Tensor) -> torch.Tensor:
+        # frames: (4, 84, 84) in [0, 1]
+        out = frames.clone()
+        # 1. Random brightness scaling
+        if torch.rand(1).item() > 0.3:
+            scale = 0.85 + torch.rand(1).item() * 0.30
+            out = out * scale
+
+        # 2. Random contrast adjustment
+        if torch.rand(1).item() > 0.4:
+            mean = out.mean()
+            contrast = 0.80 + torch.rand(1).item() * 0.40
+            out = (out - mean) * contrast + mean
+
+        # 3. Random Gaussian pixel noise
+        if torch.rand(1).item() > 0.5:
+            noise = torch.randn_like(out) * 0.02
+            out = out + noise
+
+        # 4. Random cutout (erase 12x12 square)
+        if torch.rand(1).item() > 0.5:
+            h, w = out.shape[1], out.shape[2]
+            ch, cw = 12, 12
+            top = torch.randint(0, h - ch, (1,)).item()
+            left = torch.randint(0, w - cw, (1,)).item()
+            out[:, top : top + ch, left : left + cw] = 0.0
+
+        return torch.clamp(out, 0.0, 1.0)
+
+
 class VisionFrameDataset(Dataset):
     """Dataset providing individual transitions (frame_stack, features, validity, targets).
 
@@ -26,6 +59,7 @@ class VisionFrameDataset(Dataset):
         *,
         episode_files: Sequence[str] | None = None,
         transform=None,
+        augment: bool = False,
     ):
         self.dataset_dir = Path(dataset_dir).expanduser().resolve()
         manifest = load_vision_manifest(self.dataset_dir)
@@ -37,6 +71,8 @@ class VisionFrameDataset(Dataset):
             self.selected_files = [f for f in episode_files if f in available]
 
         self.transform = transform
+        self.augment = augment
+        self._augmentor = VisionAugmentation() if augment else None
         self._samples: list[tuple[int, int]] = []  # (file_idx, step_idx)
         self._episodes: list[dict[str, np.ndarray]] = []
 
@@ -61,8 +97,12 @@ class VisionFrameDataset(Dataset):
         validity = ep["feature_valid"][step_idx].astype(np.bool_)
         targets = ep["targets"][step_idx].astype(np.int64)
 
+        frames_tensor = torch.from_numpy(frames)
+        if self._augmentor is not None:
+            frames_tensor = self._augmentor(frames_tensor)
+
         sample = {
-            "frames": torch.from_numpy(frames),
+            "frames": frames_tensor,
             "features": torch.from_numpy(features),
             "validity": torch.from_numpy(validity),
             "targets": torch.from_numpy(targets),

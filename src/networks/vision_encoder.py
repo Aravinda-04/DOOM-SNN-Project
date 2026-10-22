@@ -45,6 +45,8 @@ class VisionPerceptionEncoder(nn.Module):
         # Flattened spatial features: 64 * 7 * 7 = 3136
         self.fc_latent = nn.Linear(64 * 7 * 7, embedding_dim)
         self.ln_latent = nn.LayerNorm(embedding_dim)
+        self.drop_conv = nn.Dropout2d(p=0.15)
+        self.drop_fc = nn.Dropout(p=0.2)
 
         # Factorized Perception Heads
         # 1. Combat Head: 7 signals
@@ -52,6 +54,7 @@ class VisionPerceptionEncoder(nn.Module):
         self.combat_head = nn.Sequential(
             nn.Linear(embedding_dim, 128),
             nn.GELU(),
+            nn.Dropout(p=0.15),
             nn.Linear(128, 7),
         )
 
@@ -60,6 +63,7 @@ class VisionPerceptionEncoder(nn.Module):
         self.navigation_head = nn.Sequential(
             nn.Linear(embedding_dim, 128),
             nn.GELU(),
+            nn.Dropout(p=0.15),
             nn.Linear(128, 5),
         )
 
@@ -80,9 +84,12 @@ class VisionPerceptionEncoder(nn.Module):
             )
         x = F.gelu(self.gn1(self.conv1(frames)))
         x = F.gelu(self.gn2(self.conv2(x)))
+        x = self.drop_conv(x)
         x = F.gelu(self.gn3(self.conv3(x)))
+        x = self.drop_conv(x)
         x = torch.flatten(x, start_dim=1)
         z = F.gelu(self.ln_latent(self.fc_latent(x)))
+        z = self.drop_fc(z)
         return z
 
     def forward(self, frames: torch.Tensor) -> VisionPerceptionOutputs:

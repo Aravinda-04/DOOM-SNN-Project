@@ -56,8 +56,11 @@ def compute_perception_losses(
 
     use_target = features[:, FEATURE_INDEX["use_recommended"]]
 
-    # 1. Combat visibility loss (BCE)
-    loss_vis = F.binary_cross_entropy_with_logits(combat_raw[:, 0], vis_target)
+    # 1. Combat visibility loss with positive class weighting
+    pos_weight = torch.tensor(3.5, device=features.device)
+    loss_vis = F.binary_cross_entropy_with_logits(
+        combat_raw[:, 0], vis_target, pos_weight=pos_weight
+    )
 
     # 2. Combat attributes loss (masked to samples where enemy is actually visible)
     enemy_mask = vis_target > 0.5
@@ -128,8 +131,8 @@ def train_vision_encoder(
         raise RuntimeError(f"No vision episodes found in {dataset_dir}. Run generate_vision_dataset.py first.")
 
     print(f"Loading datasets: {len(train_files)} train episodes, {len(val_files)} validation episodes...")
-    train_dataset = VisionFrameDataset(dataset_dir, episode_files=train_files)
-    val_dataset = VisionFrameDataset(dataset_dir, episode_files=val_files)
+    train_dataset = VisionFrameDataset(dataset_dir, episode_files=train_files, augment=True)
+    val_dataset = VisionFrameDataset(dataset_dir, episode_files=val_files, augment=False)
 
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, drop_last=True)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
@@ -141,6 +144,8 @@ def train_vision_encoder(
 
     best_val_loss = float("inf")
     best_checkpoint = checkpoint_dir / "best_vision_encoder.pth"
+    patience = 6
+    patience_counter = 0
 
     print(f"Starting multi-task training for {epochs} epochs ({len(train_dataset)} samples/epoch)...")
     for epoch in range(1, epochs + 1):
@@ -173,18 +178,19 @@ def train_vision_encoder(
                 loss, _ = compute_perception_losses(outputs, features, validity)
                 val_losses.append(loss.item())
 
-        avg_train = np.mean(train_losses)
-        avg_val = np.mean(val_losses) if val_losses else avg_train
+        avg_train = float(np.mean(train_losses))
+        avg_val = float(np.mean(val_losses)) if val_losses else avg_train
         lr = optimizer.param_groups[0]["lr"]
 
         improved = avg_val < best_val_loss
         if improved:
             best_val_loss = avg_val
+            patience_counter = 0
             torch.save(
                 {
                     "model_state_dict": model.state_dict(),
-                    "epoch": epoch,
-                    "val_loss": avg_val,
+                    "epoch": int(epoch),
+                    "val_loss": float(avg_val),
                     "config": {
                         "in_channels": 4,
                         "embedding_dim": 256,
@@ -192,9 +198,15 @@ def train_vision_encoder(
                 },
                 best_checkpoint,
             )
+        else:
+            patience_counter += 1
 
         marker = " (*)" if improved else ""
         print(f"Epoch {epoch:02d}/{epochs:02d} | Train: {avg_train:.4f} | Val: {avg_val:.4f} | LR: {lr:.2e}{marker}")
+
+        if patience_counter >= patience:
+            print(f"Early stopping triggered at epoch {epoch} (no val improvement for {patience} epochs).")
+            break
 
     print(f"\nTraining completed! Best checkpoint saved to {best_checkpoint} (Val Loss: {best_val_loss:.4f})")
     return best_checkpoint
