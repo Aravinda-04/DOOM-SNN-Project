@@ -9,7 +9,7 @@ This document provides the formal mathematical and architectural breakdown of fr
 | Metric | Value | Description |
 | :--- | :---: | :--- |
 | **Doom Game Engine Native Clock** | **35.0 FPS (Hz)** | ViZDoom / Doom internal game loop rate ($1\text{ tic} \approx 28.57\text{ ms}$) |
-| **Agent Decision Frequency (Real-Time)** | **8.75 Hz** | With $\text{frame\_skip} = 4$, agent acts every 4 game tics |
+| **Agent Decision Frequency (Real-Time)** | **8.75 Hz** | With `frame_skip = 4`, agent acts every 4 game tics |
 | **Real-Time Step Time Budget** | **114.29 ms** | Maximum allowable latency per decision for real-time play |
 | **Vision Encoder Latency (12-ch RGB)** | **4.82 ms** | Processes 4-frame stack $(1, 12, 84, 84)$ in **one pass** |
 | **Recurrent LIF SNN Latency** | **30.67 ms** | 12 temporal recurrent integration steps |
@@ -29,7 +29,7 @@ Classic Doom operates on a deterministic, fixed-timestep clock:
 $$T_{\text{engine}} = 35\text{ tics / second} \implies \Delta t_{\text{tic}} = \frac{1000\text{ ms}}{35} \approx 28.571\text{ ms}$$
 
 The reinforcement learning / imitation environment operates with a frame skip parameter:
-$$k = \text{frame\_skip} = 4\text{ tics / decision step}$$
+$$k = \text{frame-skip} = 4\text{ tics / decision step}$$
 
 In real-time human play:
 - The agent makes a decision every $4$ engine tics.
@@ -92,7 +92,7 @@ Total: ~58.14 ms
 3. **LIF SNN Forward Pass**: $30.67\text{ ms}$
 4. **ViZDoom Physics Execution ($4$ tics)**: $\sim 22.45\text{ ms}$
 
-$$\Delta t_{\text{total\_step}} = 4.82 + 0.20 + 30.67 + 22.45 \approx \mathbf{58.14\text{ ms}}$$
+$$\Delta t_{\text{total}} = 4.82 + 0.20 + 30.67 + 22.45 \approx \mathbf{58.14\text{ ms}}$$
 
 ### 4.1 Live Throughput
 $$\text{Throughput} = \frac{1000\text{ ms}}{58.14\text{ ms/step}} \approx \mathbf{17.20\text{ decision steps / second}}$$
@@ -125,7 +125,7 @@ video_writer = cv2.VideoWriter(
 
 1. Exactly **1 video frame** is written per agent decision step.
 2. Each agent decision step represents **4 Doom game tics**:
-   $$\Delta t_{\text{game\_per\_frame}} = \frac{4\text{ tics}}{35\text{ tics/sec}} \approx 0.114286\text{ seconds of in-game time}$$
+   $$\Delta t_{\text{step}} = \frac{4\text{ tics}}{35\text{ tics/sec}} \approx 0.114286\text{ seconds of in-game time}$$
 3. The video player renders **20 recorded frames in 1 real-world second**:
    $$\text{In-Game Seconds Elapsed per Video Second} = 20\text{ frames/s} \times 0.114286\text{ s/frame} \approx \mathbf{2.2857\text{ seconds}}$$
 4. The video playback speed ratio is therefore:
