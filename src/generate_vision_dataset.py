@@ -27,7 +27,7 @@ from engine_state_observation import (
     visible_health_items,
 )
 from evaluate_engine_state_policy import load_policy, predicted_action
-from health_tactics import HealthTacticsArbitrator, HealthTacticsConfig
+from health_tactics import HealthTacticsArbitrator
 from map01_route import Map01Route, RouteContext
 from project_paths import PROJECT_ROOT
 from runtime_utils import resolve_device, set_random_seeds
@@ -217,8 +217,8 @@ def generate_vision_dataset(
     model.eval()
 
     print(f"Loading MAP01 route from {route_data_dir}...")
-    route = Map01Route.load(route_data_dir)
-    health_arbitrator = HealthTacticsArbitrator(HealthTacticsConfig())
+    route = Map01Route.from_demonstrations(route_data_dir)
+    health_arbitrator = HealthTacticsArbitrator()
 
     print(f"Generating vision dataset into {output_dir} across {len(seeds)} seeds...")
     total_steps = 0

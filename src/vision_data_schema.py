@@ -167,8 +167,9 @@ def append_vision_manifest_entry(dataset_dir: Path, entry: dict[str, Any]) -> Pa
     dataset_dir = Path(dataset_dir).expanduser().resolve()
     dataset_dir.mkdir(parents=True, exist_ok=True)
     manifest = load_vision_manifest(dataset_dir)
-    if any(item["episode_id"] == entry["episode_id"] for item in manifest["episodes"]):
-        raise ValueError(f"Duplicate vision episode: {entry['episode_id']}")
+    manifest["episodes"] = [
+        item for item in manifest["episodes"] if item["episode_id"] != entry["episode_id"]
+    ]
     manifest["episodes"].append(entry)
     path = dataset_dir / VISION_MANIFEST_FILENAME
     descriptor, temporary_name = tempfile.mkstemp(
