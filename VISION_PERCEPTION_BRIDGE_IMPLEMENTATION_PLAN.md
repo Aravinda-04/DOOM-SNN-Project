@@ -121,8 +121,17 @@ These features do not require visual inference because a real-world embodied age
 
 * **Implemented Modules**:
   - `src/evaluate_vision_spiking_policy.py` (Closed-loop evaluation driving the SNN entirely from camera frame stacks + internal odometry)
-* **Status**: **Completed & Verified**.
-  - Seed 3 Closed-Loop Test: **3,605.0 units displacement**, **293 steps**, and **2 verified monster kills** guided purely by raw camera pixels without any access to ViZDoom's label buffer.
+  - `src/generate_vision_dataset.py` (Multi-scenario procedural jitter data collection across `s10`, `s20`, `s30`)
+  - `src/train_vision_encoder.py` (Multi-task regularized training with spatial dropout, cutout augmentations, and positive class weighting)
+* **Status**: **Completed & Empirically Verified**.
+  - **Dataset Scaled**: 33 episodes, 17,251 synchronized transitions across 4 scenario variants and 8 seeds.
+  - **Perception Encoder Loss**: Validation loss dropped from 1.7596 down to **0.7628** (>56% error reduction).
+  - **Seed 3 Closed-Loop Test**:
+    - **Displacement**: **7,971.1 units** (more than 2x previous baseline)
+    - **Route Progress**: **91.7%** (advanced to final corridor before exit switch)
+    - **Survival**: **479 steps**
+    - **Combat**: **4.0 verified kills** with full shotgun ammo conservation (60 rounds remaining at step 450)
+    - Guided purely by raw camera pixels ($4 \times 84 \times 84$) without reading ViZDoom's `labels_buffer`.
 
 ---
 
