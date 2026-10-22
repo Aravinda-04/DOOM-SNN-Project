@@ -21,9 +21,14 @@ from engine_state_config import (
     Turning,
     compose_buttons,
 )
-from engine_state_observation import EngineStateBuilder
-from engine_state_observation import EngineStateObservation
+from engine_state_observation import (
+    EngineStateBuilder,
+    EngineStateObservation,
+    visible_enemies,
+    visible_health_items,
+)
 from engine_state_expert import EngineStateExpert
+from health_tactics import HealthTacticsArbitrator
 from map01_route import Map01Route, RouteContext, angle_delta_degrees
 from networks.engine_state_policy import (
     EngineStateGRUPolicy,
@@ -70,6 +75,8 @@ def predicted_action(
     route: RouteContext | None = None,
     ammunition: float | None = None,
     player_angle: float | None = None,
+    step: int = 0,
+    weapon_cooldown: int = 0,
 ) -> FactorizedAction:
     """Decode policy heads and enforce state-dependent control invariants."""
     action = FactorizedAction(
@@ -151,8 +158,16 @@ def predicted_action(
             use=action.use,
         )
 
-    # 4. Anti-oscillation invariant: if trapped in place for >= 4 steps, force forward motion
-    if observation is not None and observation.stuck_steps >= 4:
+    # 4. Anti-oscillation & unstuck invariant:
+    if observation is not None and observation.stuck_steps >= 12:
+        # If wedged against a wall/doorframe for >= 12 steps, back away to clear the obstacle
+        action = FactorizedAction(
+            locomotion=Locomotion.BACKWARD,
+            turning=action.turning if action.turning != Turning.NONE else Turning.RIGHT,
+            attack=False,
+            use=False,
+        )
+    elif observation is not None and observation.stuck_steps >= 4:
         action = FactorizedAction(
             locomotion=Locomotion.FORWARD,
             turning=action.turning,
@@ -194,10 +209,18 @@ def evaluate_policy(
     start_perturbation: str = "none",
     start_perturbation_steps: int = 0,
     config_file: Path | None = None,
+    enable_health_seeking: bool = True,
+    health_seeking_threshold: float = 50.0,
 ) -> dict:
     route = Map01Route.from_demonstrations(route_data)
     builder = EngineStateBuilder()
     shield = EngineStateExpert()
+    health_arbitrator = (
+        HealthTacticsArbitrator(health_threshold=health_seeking_threshold)
+        if enable_health_seeking
+        else None
+    )
+    health_detour_ticks = 0
     previous_action = FactorizedAction()
     hidden = None
     route_index = 0
@@ -207,6 +230,7 @@ def evaluate_policy(
     total_reward = 0.0
     attack_cooldown = 0
     attack_commands = 0
+    shotgun_cooldown_ticks = 0
     ammo_consumed = 0.0
     total_displacement = 0.0
     stuck_events = 0
@@ -247,7 +271,9 @@ def evaluate_policy(
             current_ammo = float(info["ammo2"] + info["ammo3"])
             if previous_ammo is not None and current_ammo < previous_ammo:
                 ammo_consumed += (previous_ammo - current_ammo)
+                shotgun_cooldown_ticks = 28
             previous_ammo = current_ammo
+            shotgun_cooldown_ticks = max(0, shotgun_cooldown_ticks - 1)
 
             current_pos = (float(info["position_x"]), float(info["position_y"]))
             if previous_pos is not None:
@@ -264,6 +290,41 @@ def evaluate_policy(
             route_index = context.progress_index
             state = env.game.get_state()
             labels = () if state is None else state.labels
+
+            if health_arbitrator is not None:
+                health_items = visible_health_items(
+                    labels, player_x=float(info["position_x"]), player_y=float(info["position_y"])
+                )
+                enemies = visible_enemies(
+                    labels, player_x=float(info["position_x"]), player_y=float(info["position_y"])
+                )
+                nearest_enemy = enemies[0] if enemies else None
+                health_subgoal = health_arbitrator.step(
+                    player_health=float(info["health"]),
+                    visible_items=health_items,
+                    nearest_enemy=nearest_enemy,
+                    player_angle=float(info["angle"]),
+                )
+                if health_subgoal is not None:
+                    health_detour_ticks += 1
+                    health_target = np.asarray(health_subgoal.position, dtype=np.float32)
+                    subgoal_delta = health_target - position
+                    subgoal_dist = float(np.linalg.norm(subgoal_delta))
+                    subgoal_bearing = float(
+                        math.degrees(math.atan2(subgoal_delta[1], subgoal_delta[0])) % 360.0
+                    )
+                    context = RouteContext(
+                        progress_index=context.progress_index,
+                        progress_fraction=context.progress_fraction,
+                        target=health_target,
+                        delta=subgoal_delta,
+                        distance=subgoal_dist,
+                        bearing_degrees=subgoal_bearing,
+                        off_track=context.off_track,
+                        use_recommended=False,
+                        recovery=False,
+                    )
+
             observation = builder.observe(info, labels, context, previous_action)
 
             stuck_steps = int(observation.stuck_steps)
@@ -291,6 +352,8 @@ def evaluate_policy(
                 route=context,
                 ammunition=float(info["ammo2"] + info["ammo3"]),
                 player_angle=float(info["angle"]),
+                step=steps,
+                weapon_cooldown=shotgun_cooldown_ticks,
             )
             attack_cooldown = max(0, attack_cooldown - 1)
             if action.attack:
@@ -383,6 +446,8 @@ def evaluate_policy(
         ),
         "start_perturbation": start_perturbation,
         "start_perturbation_steps": start_perturbation_steps,
+        "health_detour_ticks": health_detour_ticks,
+        "enable_health_seeking": bool(enable_health_seeking),
     }
 
 
@@ -429,6 +494,18 @@ def parse_args() -> argparse.Namespace:
         help="Optional path to a custom ViZDoom scenario .cfg file.",
     )
     parser.add_argument(
+        "--enable-health-seeking",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Opportunistically seek visible health items when HP is low.",
+    )
+    parser.add_argument(
+        "--health-seeking-threshold",
+        type=float,
+        default=50.0,
+        help="Health threshold below which to consider health detours.",
+    )
+    parser.add_argument(
         "--report-json",
         type=Path,
         default=None,
@@ -464,6 +541,8 @@ def main() -> int:
         attack_cooldown_steps=args.attack_cooldown_steps,
         start_perturbation=args.start_perturbation,
         start_perturbation_steps=args.start_perturbation_steps,
+        enable_health_seeking=args.enable_health_seeking,
+        health_seeking_threshold=args.health_seeking_threshold,
         config_file=(
             args.config_file.expanduser().resolve()
             if args.config_file is not None
@@ -481,6 +560,7 @@ def main() -> int:
     print(f"Shots fired    : {result['shots_fired']} (attack commands: {result['attack_commands']})")
     print(f"Ammo consumed  : {result['ammo_consumed']:.0f} (remaining: {result['ammo_remaining']:.0f})")
     print(f"Attack precis. : {result['attack_precision']:.1%}")
+    print(f"Health detours : {result['health_detour_ticks']} ticks")
     print(f"Displacement   : {result['total_displacement']:.1f}")
     print(f"Stuck events   : {result['stuck_events']} (max: {result['max_stuck_steps']} steps, total: {result['total_stuck_steps']} steps)")
     print(f"Reward         : {result['reward']:+.2f}")

@@ -22,7 +22,12 @@ from engine_state_demonstrations import (
     save_sequence,
 )
 from engine_state_expert import EngineStateExpert
-from engine_state_observation import EngineStateBuilder, visible_enemies
+from engine_state_observation import (
+    EngineStateBuilder,
+    VisibleHealthItem,
+    visible_enemies,
+    visible_health_items,
+)
 from evaluate_engine_state_policy import predicted_action
 from map01_route import Map01Route, angle_delta_degrees
 from networks.engine_state_policy import (
@@ -267,4 +272,64 @@ def test_engine_state_spiking_policy_forward_and_backward():
         for param in model.parameters()
         if param.requires_grad
     )
+
+
+def test_visible_health_items_detection_and_priority():
+    def _item(name, x, y, screen_x=80, width=15, height=15):
+        return SimpleNamespace(
+            object_name=name,
+            object_position_x=x,
+            object_position_y=y,
+            x=screen_x,
+            y=50,
+            width=width,
+            height=height,
+        )
+
+    labels = [
+        _enemy(x=120.0, y=0.0),                               # hostile enemy
+        _item("HealthBonus", 30.0, 0.0),                     # +1 HP, distance 30, priority 0.2 -> score 30 / 0.2 = 150
+        _item("Medikit", 100.0, 0.0),                        # +25 HP, distance 100, priority 1.0 -> score 100 / 1.0 = 100
+        _item("Stimpack", 80.0, 0.0),                        # +10 HP, distance 80, priority 0.7 -> score 80 / 0.7 = 114.3
+    ]
+    items = visible_health_items(labels, player_x=0.0, player_y=0.0)
+    assert len(items) == 3
+    # Medikit has best priority-adjusted score (100) and comes first despite being further than HealthBonus
+    assert items[0].name == "Medikit"
+    assert items[0].heal_amount == 25
+    assert items[0].distance == pytest.approx(100.0)
+
+    assert items[1].name == "Stimpack"
+    assert items[1].heal_amount == 10
+    assert items[1].distance == pytest.approx(80.0)
+
+    assert items[2].name == "HealthBonus"
+    assert items[2].heal_amount == 1
+    assert items[2].distance == pytest.approx(30.0)
+
+
+def test_engine_state_builder_with_health_items():
+    builder = EngineStateBuilder()
+    route = Map01Route(
+        np.asarray(((0.0, 0.0), (100.0, 0.0)), dtype=np.float32),
+        source_sha256="0" * 64,
+    )
+    context = route.context(np.zeros(2, dtype=np.float32), 0)
+    labels = [
+        SimpleNamespace(
+            object_name="Medikit",
+            object_position_x=50.0,
+            object_position_y=0.0,
+            x=70,
+            y=40,
+            width=20,
+            height=20,
+        )
+    ]
+    obs = builder.observe(_diagnostics(), labels, context)
+    assert obs.features.shape == (len(FEATURE_NAMES),)
+    assert obs.visible_health_item_count == 1
+    assert obs.nearest_health_item is not None
+    assert obs.nearest_health_item.name == "Medikit"
+    assert obs.nearest_health_item.distance == pytest.approx(50.0)
 
