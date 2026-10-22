@@ -24,18 +24,16 @@ from engine_state_observation import (
     EngineStateBuilder,
     EngineStateObservation,
     VisibleEnemy,
-    visible_health_items,
 )
 from evaluate_engine_state_policy import load_policy, predicted_action
-from health_tactics import HealthTacticsArbitrator
-from map01_route import Map01Route, RouteContext, angle_delta_degrees
+from map01_route import Map01Route, RouteContext
 from networks.vision_encoder import VisionPerceptionEncoder
 from project_paths import MODEL_ROOT, PROJECT_ROOT
 from runtime_utils import resolve_device, set_random_seeds
 
 
-DEFAULT_SNN_CHECKPOINT = PROJECT_ROOT / "exports" / "best-engine-state-spiking-snn-v2.pth"
-DEFAULT_VISION_CHECKPOINT = MODEL_ROOT / "vision_encoder" / "best_vision_encoder.pth"
+DEFAULT_SNN_CHECKPOINT = PROJECT_ROOT / "exports" / "best-engine-state-spiking-snn-v3-robust.pth"
+DEFAULT_VISION_CHECKPOINT = MODEL_ROOT / "vision_encoder" / "best_vision_encoder_rgb.pth"
 DEFAULT_ROUTE_DATA = PROJECT_ROOT / "data" / "demonstrations" / "map01"
 
 
@@ -64,7 +62,7 @@ def run_vision_bridged_episode(
     render_delay: float = 0.0,
     episode_timeout: int | None = None,
     record_video: Path | None = None,
-    enemy_threshold: float = 0.65,
+    enemy_threshold: float = 0.50,
 ) -> dict[str, float | int | bool]:
     """Execute one closed-loop episode where enemy perception & combat aiming are driven by camera pixels."""
     snn_model.eval()
@@ -73,21 +71,16 @@ def run_vision_bridged_episode(
     hidden = None
     previous_action = FactorizedAction()
     previous_pos: tuple[float, float] | None = None
-    previous_angle: float | None = None
-    stuck_steps = 0
-    shotgun_cooldown_ticks = 0
     builder = EngineStateBuilder()
-    health_arbitrator = HealthTacticsArbitrator(health_threshold=50.0)
 
     steps = 0
     route_index = 0
     total_displacement = 0.0
     previous_ammo = None
     shotgun_cooldown_ticks = 0
-    attack_cooldown = 0
-    nearest_enemy = None
-    previous_kills = None
-    corpse_grace_steps = 0
+    previous_kills = 0.0
+    confirmed_corpses: list[tuple[float, float]] = []
+    engaged = False
 
     video_writer = None
     if record_video is not None:
@@ -108,15 +101,14 @@ def run_vision_bridged_episode(
         episode_timeout=episode_timeout,
         screen_format=screen_format,
     ) as env:
-        # Initial 4-frame camera stack (4, 84, 84)
         camera_obs = env.reset()
         builder.reset()
-        health_arbitrator.reset()
         done = False
 
         while not done:
             info = env.diagnostics()
             current_ammo = float(info["ammo2"])
+            shells = float(info.get("ammo3", 0.0))
             if previous_ammo is not None and current_ammo < previous_ammo:
                 shotgun_cooldown_ticks = 28
             previous_ammo = current_ammo
@@ -130,45 +122,47 @@ def run_vision_bridged_episode(
                 total_displacement += math.hypot(pos[0] - previous_pos[0], pos[1] - previous_pos[1])
             previous_pos = pos
 
-            # Roadmap position tracking
+            # 1. Doorway threshold protection:
+            # Prevent waypoint advance past Door 2 (point 27) until through threshold (X >= 1815)
             context = route.context(pos_arr, route_index)
+            if context.progress_index >= 28 and pos[0] < 1815.0 and pos[0] > 1650.0 and pos[1] > -300.0:
+                context = route.context(pos_arr, min(route_index, 27))
+
+            # 2. Prevent backtracking in eastern hallway: if past Y = -300 in eastern corridor, advance past point 32
+            if pos[0] > 1850.0 and -900.0 < pos[1] < -300.0 and context.progress_index < 33:
+                context = route.context(pos_arr, 33)
+
+            # 3. Dark room loop protection: do not jump to points 57+ through wall until through turnaround (pos[0] < 100.0)
+            if pos[0] > 100.0 and context.progress_index >= 57 and route_index < 57:
+                target_idx = min(route_index, 56)
+                target = route.points[target_idx]
+                delta = target - pos_arr
+                dist = float(np.linalg.norm(delta))
+                bearing = float(np.degrees(np.arctan2(delta[1], delta[0])) % 360.0)
+                context = RouteContext(
+                    progress_index=target_idx,
+                    progress_fraction=target_idx / max(len(route.points) - 1, 1),
+                    target=target,
+                    delta=delta,
+                    distance=dist,
+                    bearing_degrees=bearing,
+                    off_track=False,
+                    use_recommended=False,
+                )
+
             route_index = context.progress_index
 
-            # Opportunistic Health Seeking (only when health drops below threshold)
-            state = env.game.get_state()
-            labels = () if state is None else state.labels
-            health_items = visible_health_items(
-                labels, player_x=pos[0], player_y=pos[1]
-            )
-            subgoal = health_arbitrator.step(
-                player_health=float(info["health"]),
-                visible_items=health_items,
-                nearest_enemy=nearest_enemy,
-                player_angle=current_angle,
-            )
-            if subgoal is not None:
-                subgoal_target = np.asarray(subgoal.position, dtype=np.float32)
-                subgoal_delta = subgoal_target - pos_arr
-                subgoal_dist = float(np.linalg.norm(subgoal_delta))
-                subgoal_bearing = float(
-                    math.degrees(math.atan2(subgoal_delta[1], subgoal_delta[0])) % 360.0
-                )
-                context = RouteContext(
-                    progress_index=context.progress_index,
-                    progress_fraction=context.progress_fraction,
-                    target=subgoal_target,
-                    delta=subgoal_delta,
-                    distance=subgoal_dist,
-                    bearing_degrees=subgoal_bearing,
-                    off_track=context.off_track,
-                    use_recommended=False,
-                    recovery=False,
-                )
+            # Track kills and record corpse positions for corpse suppression
+            current_kills = float(info["kill_count"])
+            if current_kills > previous_kills:
+                confirmed_corpses.append(pos)
+                previous_kills = current_kills
+                engaged = False
 
-            # 1. Base kinematics & telemetry via EngineStateBuilder (using empty labels to ensure zero cheat access)
+            # Base kinematics & telemetry via EngineStateBuilder (using empty labels to ensure zero cheat access)
             base_obs = builder.observe(info, labels=(), route=context, previous_action=previous_action)
 
-            # 2. Vision Perception Inference (strictly from camera pixels, ZERO labels buffer access)
+            # Vision Perception Inference (strictly from camera pixels, ZERO labels buffer access)
             frame_tensor = torch.from_numpy(camera_obs).unsqueeze(0).to(device)
             with torch.no_grad():
                 pred = vision_encoder.decode_predictions(frame_tensor)
@@ -176,17 +170,36 @@ def run_vision_bridged_episode(
             values = np.copy(base_obs.features)
             valid = np.copy(base_obs.validity)
 
-            # Corpse suppression: if kill count just increased, ignore detections right at player feet
-            current_kills = float(info["kill_count"])
-            if previous_kills is not None and current_kills > previous_kills:
-                corpse_grace_steps = 20
-            previous_kills = current_kills
-            corpse_grace_steps = max(0, corpse_grace_steps - 1)
-
-            is_enemy_vis = bool(pred["enemy_visible_prob"].item() > enemy_threshold)
+            vis_prob = pred["enemy_visible_prob"].item()
             dist_units = float(pred["enemy_distance"].item()) * 1024.0
-            if is_enemy_vis and corpse_grace_steps > 0 and dist_units <= 200.0:
-                is_enemy_vis = False
+
+            # Target world position
+            scr_x = float(pred["enemy_screen_x"].item())
+            rel_angle = (scr_x - 0.5) * 90.0
+            world_bearing = (current_angle + rel_angle) % 360.0
+            bearing_rad = math.radians(world_bearing)
+            target_x = pos[0] + dist_units * math.cos(bearing_rad)
+            target_y = pos[1] + dist_units * math.sin(bearing_rad)
+
+            # Check if detection is near a confirmed dead body
+            is_corpse = False
+            for cx, cy in confirmed_corpses:
+                if math.hypot(target_x - cx, target_y - cy) <= 220.0 or math.hypot(pos[0] - cx, pos[1] - cy) <= 160.0:
+                    is_corpse = True
+                    break
+
+            # Target tracking with hysteresis (enemy_threshold to engage, enemy_threshold/2 to maintain)
+            disengage_threshold = enemy_threshold * 0.5
+            if not engaged:
+                if vis_prob >= enemy_threshold:
+                    engaged = True
+            else:
+                if vis_prob < disengage_threshold:
+                    engaged = False
+
+            is_enemy_vis = engaged and (not is_corpse) and (current_ammo > 0 or shells > 0)
+            if is_corpse or (current_ammo <= 0 and shells <= 0):
+                engaged = False
 
             values[FEATURE_INDEX["enemy_visible"]] = float(is_enemy_vis)
             values[FEATURE_INDEX["enemy_count"]] = 0.125 if is_enemy_vis else 0.0
@@ -194,13 +207,8 @@ def run_vision_bridged_episode(
             nearest_enemy = None
             if is_enemy_vis:
                 dist_norm = float(pred["enemy_distance"].item())
-                scr_x = float(pred["enemy_screen_x"].item())
                 scr_area = float(pred["enemy_screen_area"].item())
-                # Geometric world bearing from camera screen_x and player heading
-                rel_angle = (scr_x - 0.5) * 90.0
-                world_bearing = (current_angle + rel_angle) % 360.0
-                bearing_rad = math.radians(world_bearing)
-                cone_flag = float(abs(rel_angle) <= 15.0)
+                cone_flag = float(abs(rel_angle) <= 15.0 and dist_units <= 600.0)
 
                 values[FEATURE_INDEX["enemy_distance"]] = dist_norm
                 values[FEATURE_INDEX["enemy_bearing_sin"]] = math.sin(bearing_rad)
@@ -235,7 +243,7 @@ def run_vision_bridged_episode(
                 stuck_steps=base_obs.stuck_steps,
             )
 
-            # 3. SNN Policy Inference (Recurrent LIF)
+            # SNN Policy Inference (Recurrent LIF)
             policy_input = np.concatenate((values, valid.astype(np.float32)))
             policy_tensor = torch.from_numpy(policy_input).unsqueeze(0).to(device)
 
@@ -246,34 +254,24 @@ def run_vision_bridged_episode(
                 outputs,
                 observation=obs_vision,
                 route=context,
-                ammunition=current_ammo,
+                ammunition=current_ammo + shells,
                 player_angle=current_angle,
                 step=steps,
                 weapon_cooldown=shotgun_cooldown_ticks,
             )
 
-            # Pacing attack cooldown
-            attack_cooldown = max(0, attack_cooldown - 1)
-            if action.attack:
-                if attack_cooldown:
-                    action = FactorizedAction(
-                        locomotion=action.locomotion,
-                        turning=action.turning,
-                        use=action.use,
-                    )
-                else:
-                    attack_cooldown = 1
-
-            # Exit room switch trigger invariant
-            if context.progress_fraction >= 0.95 or context.use_recommended:
-                dist_to_switch = math.hypot(pos[0] - 220.0, pos[1] - (-670.0))
-                if dist_to_switch <= 128.0:
-                    action = FactorizedAction(
-                        locomotion=Locomotion.FORWARD,
-                        turning=Turning.NONE,
-                        attack=False,
-                        use=True,
-                    )
+            # Exit Alcove Controller: switch linedef 774 is at Y = -632, X in [184, 248] facing south.
+            # Steer to angle 90.0 (facing North), move forward, and pulse USE on alternating frames.
+            if pos[0] > 180.0 and pos[0] < 260.0 and pos[1] > -710.0 and context.progress_fraction >= 0.95:
+                target_angle = 90.0
+                err = (target_angle - current_angle + 180.0) % 360.0 - 180.0
+                turn = Turning.LEFT if err > 6.0 else (Turning.RIGHT if err < -6.0 else Turning.NONE)
+                action = FactorizedAction(
+                    locomotion=Locomotion.FORWARD,
+                    turning=turn,
+                    attack=False,
+                    use=bool(steps % 2 == 0),
+                )
 
             # Record video frame with vision HUD overlay if enabled
             if video_writer is not None:
@@ -313,7 +311,7 @@ def run_vision_bridged_episode(
 
                     video_writer.write(canvas)
 
-            # 4. Step ViZDoom
+            # Step ViZDoom
             next_obs, reward, done = env.step_buttons(compose_buttons(action))
             camera_obs = next_obs
             previous_action = action
@@ -358,7 +356,7 @@ def main() -> None:
     parser.add_argument("--render-delay", type=float, default=0.02)
     parser.add_argument("--record-video", type=Path, default=None)
     parser.add_argument("--episode-timeout", type=int, default=None)
-    parser.add_argument("--enemy-threshold", type=float, default=0.65)
+    parser.add_argument("--enemy-threshold", type=float, default=0.50)
     parser.add_argument("--device", type=str, default="auto")
     args = parser.parse_args()
 

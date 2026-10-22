@@ -99,6 +99,7 @@ class DoomLevelEnvironment:
         new coarse map region. The name is retained for API compatibility;
         ViZDoom object labels do not expose sector indices.
     """
+    _screen_format: str = "GRAY8"
 
     def __init__(
         self,
