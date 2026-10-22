@@ -109,12 +109,22 @@ class DoomLevelEnvironment:
         sector_novelty: bool = True,
         episode_timeout: Optional[int] = None,
         spectator: bool = False,
+        screen_format: str = "GRAY8",
     ):
         if frame_skip <= 0:
             raise ValueError("frame_skip must be positive.")
         self._frame_skip = frame_skip
         self._sector_novelty = sector_novelty
         self._spectator = spectator
+        self._screen_format = screen_format.upper()
+        if self._screen_format == "RGB24":
+            vzd_format = vzd.ScreenFormat.RGB24
+        elif self._screen_format == "GRAY8":
+            vzd_format = vzd.ScreenFormat.GRAY8
+        else:
+            raise ValueError(
+                f"Unsupported screen_format '{screen_format}'. Must be 'GRAY8' or 'RGB24'."
+            )
 
         self.game = vzd.DoomGame()
         config_path = Path(config_file or LEVEL_CONFIG_PATH).expanduser().resolve()
@@ -139,7 +149,7 @@ class DoomLevelEnvironment:
                 self.game.set_mode(vzd.Mode.SPECTATOR)
             
             self.game.set_screen_resolution(vzd.ScreenResolution.RES_160X120)
-            self.game.set_screen_format(vzd.ScreenFormat.GRAY8)
+            self.game.set_screen_format(vzd_format)
             self.game.set_window_visible(render)
             self.game.set_labels_buffer_enabled(True)
             self.game.set_automap_buffer_enabled(False)
@@ -183,9 +193,9 @@ class DoomLevelEnvironment:
                 f"Unexpected game-variable order in {config_path}: "
                 f"expected {EXPECTED_GAME_VARIABLES}, got {actual_variables}."
             )
-        if self.game.get_screen_format() != vzd.ScreenFormat.GRAY8:
+        if self.game.get_screen_format() not in (vzd.ScreenFormat.GRAY8, vzd.ScreenFormat.RGB24):
             raise ValueError(
-                f"Unexpected screen format in {config_path}; GRAY8 is required."
+                f"Unexpected screen format in {config_path}; GRAY8 or RGB24 is required."
             )
 
     # ------------------------------------------------------------------
@@ -317,9 +327,12 @@ class DoomLevelEnvironment:
             # State buffers are unavailable after a terminal action. Preserve
             # the last readable game variables and use explicit engine flags
             # to distinguish completion, death, and timeout.
-            self._frame_buf.append(
-                np.zeros((FRAME_HEIGHT, FRAME_WIDTH), dtype=np.float32)
+            terminal_frame = (
+                np.zeros((3, FRAME_HEIGHT, FRAME_WIDTH), dtype=np.float32)
+                if self._screen_format == "RGB24"
+                else np.zeros((FRAME_HEIGHT, FRAME_WIDTH), dtype=np.float32)
             )
+            self._frame_buf.append(terminal_frame)
             self._terminal_reason = self._classify_terminal_reason()
             self._exit_triggered = self._terminal_reason is TerminalReason.COMPLETED
             shaped = self._terminal_reward(raw_reward)
@@ -333,14 +346,21 @@ class DoomLevelEnvironment:
     # ------------------------------------------------------------------
 
     def _preprocess(self, frame: np.ndarray) -> np.ndarray:
-        """Resize 160×120 grayscale → 84×84 float32 in [0, 1]."""
+        """Resize 160×120 → 84×84 float32 in [0, 1]."""
+        if self._screen_format == "RGB24":
+            resized = cv2.resize(
+                frame, (FRAME_WIDTH, FRAME_HEIGHT), interpolation=cv2.INTER_AREA
+            )
+            return resized.transpose(2, 0, 1).astype(np.float32) / 255.0
         resized = cv2.resize(
             frame, (FRAME_WIDTH, FRAME_HEIGHT), interpolation=cv2.INTER_AREA
         )
         return resized.astype(np.float32) / 255.0
 
     def _stacked_obs(self) -> np.ndarray:
-        """Return (FRAME_STACK, 84, 84) observation array."""
+        """Return stacked observation array: (12, 84, 84) if RGB24 else (4, 84, 84)."""
+        if self._screen_format == "RGB24":
+            return np.concatenate(list(self._frame_buf), axis=0)
         return np.stack(self._frame_buf, axis=0)
 
     # ------------------------------------------------------------------

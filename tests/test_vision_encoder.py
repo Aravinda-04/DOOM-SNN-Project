@@ -21,6 +21,18 @@ def test_vision_encoder_shapes():
     assert outputs.embedding.shape == (batch_size, 256)
 
 
+def test_vision_encoder_rgb_shapes():
+    model = VisionPerceptionEncoder(in_channels=12)
+    batch_size = 4
+    dummy_input = torch.rand(batch_size, 12, FRAME_HEIGHT, FRAME_WIDTH)
+
+    outputs = model(dummy_input)
+    assert outputs.combat.shape == (batch_size, 7)
+    assert outputs.navigation.shape == (batch_size, 5)
+    assert outputs.interaction.shape == (batch_size, 1)
+    assert outputs.embedding.shape == (batch_size, 256)
+
+
 def test_vision_encoder_decode_predictions():
     model = VisionPerceptionEncoder()
     dummy_input = torch.rand(2, FRAME_STACK, FRAME_HEIGHT, FRAME_WIDTH)

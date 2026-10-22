@@ -45,7 +45,8 @@ def load_vision_encoder(checkpoint_path: Path, device: torch.device) -> VisionPe
     if not checkpoint_path.is_file():
         raise FileNotFoundError(f"Vision encoder checkpoint not found: {checkpoint_path}")
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    model = VisionPerceptionEncoder()
+    in_channels = int(checkpoint.get("in_channels", checkpoint.get("config", {}).get("in_channels", 4)))
+    model = VisionPerceptionEncoder(in_channels=in_channels)
     model.load_state_dict(checkpoint["model_state_dict"])
     model.to(device)
     model.eval()
@@ -63,6 +64,7 @@ def run_vision_bridged_episode(
     render_delay: float = 0.0,
     episode_timeout: int | None = None,
     record_video: Path | None = None,
+    enemy_threshold: float = 0.65,
 ) -> dict[str, float | int | bool]:
     """Execute one closed-loop episode where enemy perception & combat aiming are driven by camera pixels."""
     snn_model.eval()
@@ -98,10 +100,13 @@ def run_vision_bridged_episode(
             (640, 480),
         )
 
+    screen_format = "RGB24" if getattr(vision_encoder, "in_channels", 4) == 12 else "GRAY8"
+
     with DoomLevelEnvironment(
         render=render,
         seed=seed,
         episode_timeout=episode_timeout,
+        screen_format=screen_format,
     ) as env:
         # Initial 4-frame camera stack (4, 84, 84)
         camera_obs = env.reset()
@@ -111,7 +116,7 @@ def run_vision_bridged_episode(
 
         while not done:
             info = env.diagnostics()
-            current_ammo = float(info["ammo2"] + info["ammo3"])
+            current_ammo = float(info["ammo2"])
             if previous_ammo is not None and current_ammo < previous_ammo:
                 shotgun_cooldown_ticks = 28
             previous_ammo = current_ammo
@@ -178,7 +183,7 @@ def run_vision_bridged_episode(
             previous_kills = current_kills
             corpse_grace_steps = max(0, corpse_grace_steps - 1)
 
-            is_enemy_vis = bool(pred["enemy_visible_prob"].item() > 0.5)
+            is_enemy_vis = bool(pred["enemy_visible_prob"].item() > enemy_threshold)
             dist_units = float(pred["enemy_distance"].item()) * 1024.0
             if is_enemy_vis and corpse_grace_steps > 0 and dist_units <= 200.0:
                 is_enemy_vis = False
@@ -275,7 +280,14 @@ def run_vision_bridged_episode(
                 game_state = env.game.get_state()
                 if game_state is not None and game_state.screen_buffer is not None:
                     raw_screen = game_state.screen_buffer
-                    bgr_frame = cv2.cvtColor(raw_screen, cv2.COLOR_GRAY2BGR)
+                    if raw_screen.ndim == 2:
+                        bgr_frame = cv2.cvtColor(raw_screen, cv2.COLOR_GRAY2BGR)
+                    elif raw_screen.ndim == 3 and raw_screen.shape[2] == 3:
+                        bgr_frame = cv2.cvtColor(raw_screen, cv2.COLOR_RGB2BGR)
+                    elif raw_screen.ndim == 3 and raw_screen.shape[0] == 3:
+                        bgr_frame = cv2.cvtColor(raw_screen.transpose(1, 2, 0), cv2.COLOR_RGB2BGR)
+                    else:
+                        bgr_frame = cv2.cvtColor(raw_screen, cv2.COLOR_GRAY2BGR)
                     canvas = cv2.resize(bgr_frame, (640, 480), interpolation=cv2.INTER_NEAREST)
 
                     cv2.rectangle(canvas, (0, 0), (640, 56), (20, 20, 20), -1)
@@ -332,6 +344,7 @@ def run_vision_bridged_episode(
         "health": float(final["health"]),
         "displacement": total_displacement,
         "terminal_reason": str(final["terminal_reason"]),
+        "route_progress": float(context.progress_fraction),
     }
 
 
@@ -345,6 +358,7 @@ def main() -> None:
     parser.add_argument("--render-delay", type=float, default=0.02)
     parser.add_argument("--record-video", type=Path, default=None)
     parser.add_argument("--episode-timeout", type=int, default=None)
+    parser.add_argument("--enemy-threshold", type=float, default=0.65)
     parser.add_argument("--device", type=str, default="auto")
     args = parser.parse_args()
 
@@ -358,7 +372,7 @@ def main() -> None:
     print(f"Loading MAP01 route from {args.route_dir}...")
     route = Map01Route.from_demonstrations(args.route_dir)
 
-    print(f"\nRunning Closed-Loop Vision-Bridged Evaluation on Seed {args.seed}...")
+    print(f"\nRunning Closed-Loop Vision-Bridged Evaluation on Seed {args.seed} (enemy_threshold={args.enemy_threshold})...")
     results = run_vision_bridged_episode(
         snn_model=snn_model,
         vision_encoder=vision_encoder,
@@ -369,6 +383,7 @@ def main() -> None:
         render_delay=args.render_delay,
         episode_timeout=args.episode_timeout,
         record_video=args.record_video,
+        enemy_threshold=args.enemy_threshold,
     )
 
     print("\n--- Evaluation Results ---")
@@ -377,6 +392,7 @@ def main() -> None:
     print(f"Steps: {results['steps']}")
     print(f"Kills: {results['kills']}")
     print(f"Final Health: {results['health']}")
+    print(f"Route Progress: {results['route_progress']:.1%}")
     print(f"Displacement: {results['displacement']:.1f}")
     print(f"Terminal Reason: {results['terminal_reason']}")
 

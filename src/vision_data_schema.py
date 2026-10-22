@@ -54,10 +54,14 @@ def validate_vision_sequence(
     metadata: dict[str, Any],
 ) -> None:
     """Validate shape, type, and values of vision sequence arrays."""
-    if frames.ndim != 4 or frames.shape[1:] != (FRAME_STACK, FRAME_HEIGHT, FRAME_WIDTH):
+    valid_channel_shapes = (
+        (FRAME_STACK, FRAME_HEIGHT, FRAME_WIDTH),
+        (FRAME_STACK * 3, FRAME_HEIGHT, FRAME_WIDTH),
+    )
+    if frames.ndim != 4 or frames.shape[1:] not in valid_channel_shapes:
         raise ValueError(
-            f"frames must have shape (T, {FRAME_STACK}, {FRAME_HEIGHT}, {FRAME_WIDTH}), "
-            f"got {frames.shape}."
+            f"frames must have shape (T, {FRAME_STACK}, {FRAME_HEIGHT}, {FRAME_WIDTH}) or "
+            f"(T, {FRAME_STACK * 3}, {FRAME_HEIGHT}, {FRAME_WIDTH}), got {frames.shape}."
         )
     length = frames.shape[0]
     if length == 0:

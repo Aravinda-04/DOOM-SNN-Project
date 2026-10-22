@@ -53,6 +53,11 @@ def test_validate_vision_sequence_checks_dimensions():
     # Valid call should not raise
     validate_vision_sequence(metadata=metadata, **arrays)
 
+    # Valid RGB call (12 channels) should not raise
+    rgb_arrays = arrays.copy()
+    rgb_arrays["frames"] = np.zeros((10, 12, 84, 84), dtype=np.uint8)
+    validate_vision_sequence(metadata=metadata, **rgb_arrays)
+
     # Bad frame shape should raise
     bad_frames = arrays.copy()
     bad_frames["frames"] = np.zeros((10, 1, 84, 84), dtype=np.uint8)

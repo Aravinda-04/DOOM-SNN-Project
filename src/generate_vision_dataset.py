@@ -54,6 +54,7 @@ def generate_vision_episode(
     episode_timeout: int | None = 2100,
     health_arbitrator: HealthTacticsArbitrator | None = None,
     config_file: Path | None = None,
+    screen_format: str = "GRAY8",
 ) -> tuple[dict, dict[str, np.ndarray]]:
     """Simulate one episode capturing aligned (frames, features, validity, targets)."""
     builder = EngineStateBuilder()
@@ -82,6 +83,7 @@ def generate_vision_episode(
         render=False,
         seed=seed,
         episode_timeout=episode_timeout,
+        screen_format=screen_format,
     ) as env:
         current_obs = env.reset()
         builder.reset()
@@ -189,6 +191,7 @@ def generate_vision_episode(
         "kills": float(final["kill_count"]),
         "items": float(final["item_count"]),
         "final_health": float(final["health"]),
+        "screen_format": screen_format,
     }
 
     arrays = {
@@ -213,6 +216,7 @@ def generate_vision_dataset(
     seeds: tuple[int, ...] = PASSING_SEEDS,
     config_paths: Sequence[Path | None] | None = None,
     device: str = "auto",
+    screen_format: str = "GRAY8",
 ) -> None:
     output_dir = Path(output_dir).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -230,7 +234,7 @@ def generate_vision_dataset(
     total_runs = len(active_configs) * len(seeds)
     print(
         f"Generating vision dataset into {output_dir} across "
-        f"{len(active_configs)} configs and {len(seeds)} seeds ({total_runs} episodes)..."
+        f"{len(active_configs)} configs and {len(seeds)} seeds ({total_runs} episodes) in {screen_format} mode..."
     )
     total_steps = 0
     saved_episodes = 0
@@ -240,7 +244,7 @@ def generate_vision_dataset(
         cfg_name = cfg.stem if cfg is not None else "map01"
         for seed in seeds:
             run_idx += 1
-            print(f"[{run_idx}/{total_runs}] Simulating config={cfg_name} seed={seed}...", end="", flush=True)
+            print(f"[{run_idx}/{total_runs}] Simulating config={cfg_name} seed={seed} ({screen_format})...", end="", flush=True)
             metadata, arrays = generate_vision_episode(
                 route=route,
                 seed=seed,
@@ -248,6 +252,7 @@ def generate_vision_dataset(
                 device=resolved_device,
                 health_arbitrator=health_arbitrator,
                 config_file=cfg,
+                screen_format=screen_format,
             )
             completed = metadata["completed"]
             steps = metadata["steps"]
@@ -271,6 +276,7 @@ def generate_vision_dataset(
                     "completed": completed,
                     "kills": kills,
                     "sha256": sha256,
+                    "screen_format": screen_format,
                 }
                 append_vision_manifest_entry(output_dir, manifest_entry)
                 saved_episodes += 1
@@ -281,7 +287,8 @@ def generate_vision_dataset(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate vision perception dataset for MAP01.")
-    parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
+    parser.add_argument("--output-dir", type=Path, default=None)
+    parser.add_argument("--screen-format", type=str, default="GRAY8", choices=["GRAY8", "RGB24"])
     parser.add_argument("--checkpoint", type=Path, default=DEFAULT_CHECKPOINT)
     parser.add_argument("--route-dir", type=Path, default=DEFAULT_ROUTE_DATA)
     parser.add_argument("--seeds", type=int, nargs="+", default=list(PASSING_SEEDS))
@@ -295,13 +302,22 @@ def main() -> None:
     parser.add_argument("--device", type=str, default="auto")
     args = parser.parse_args()
 
+    screen_fmt = args.screen_format.upper()
+    if args.output_dir is not None:
+        target_dir = args.output_dir
+    elif screen_fmt == "RGB24":
+        target_dir = PROJECT_ROOT / "data" / "generated" / "map01-vision-rgb-v1"
+    else:
+        target_dir = DEFAULT_OUTPUT_DIR
+
     generate_vision_dataset(
-        output_dir=args.output_dir,
+        output_dir=target_dir,
         checkpoint_path=args.checkpoint,
         route_data_dir=args.route_dir,
         seeds=tuple(args.seeds),
         config_paths=args.configs,
         device=args.device,
+        screen_format=screen_fmt,
     )
 
 

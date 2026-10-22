@@ -137,13 +137,18 @@ def train_vision_encoder(
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, drop_last=True)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
 
-    print(f"Initializing VisionPerceptionEncoder on {resolved_device}...")
-    model = VisionPerceptionEncoder().to(resolved_device)
+    sample_frames = train_dataset[0]["frames"]
+    in_channels = int(sample_frames.shape[0])
+    is_rgb = in_channels == 12
+    checkpoint_name = "best_vision_encoder_rgb.pth" if is_rgb else "best_vision_encoder.pth"
+    best_checkpoint = checkpoint_dir / checkpoint_name
+
+    print(f"Initializing VisionPerceptionEncoder(in_channels={in_channels}, is_rgb={is_rgb}) on {resolved_device}...")
+    model = VisionPerceptionEncoder(in_channels=in_channels).to(resolved_device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-5)
 
     best_val_loss = float("inf")
-    best_checkpoint = checkpoint_dir / "best_vision_encoder.pth"
     patience = 6
     patience_counter = 0
 
@@ -191,8 +196,9 @@ def train_vision_encoder(
                     "model_state_dict": model.state_dict(),
                     "epoch": int(epoch),
                     "val_loss": float(avg_val),
+                    "in_channels": in_channels,
                     "config": {
-                        "in_channels": 4,
+                        "in_channels": in_channels,
                         "embedding_dim": 256,
                     },
                 },
