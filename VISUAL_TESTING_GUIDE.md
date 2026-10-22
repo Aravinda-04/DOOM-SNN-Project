@@ -1,6 +1,6 @@
 # ViZDoom Visual Evaluation & Generalization Testing Guide
 
-This guide contains all terminal commands to watch the autonomous neural network policies navigate, aim, and clear levels live in the ViZDoom graphical window.
+This guide contains all terminal commands to watch the autonomous neural network policies navigate, aim, and clear levels live in the ViZDoom graphical window or export recorded gameplay videos with real-time HUD overlays.
 
 All commands should be executed from the project root (`e:\Side project`) in PowerShell or your terminal.
 
@@ -20,9 +20,76 @@ This script will:
 
 ---
 
-## 1. Quick Start: Standard MAP01 Visual Runs
+## 1. Closed-Loop Vision-Bridged SNN (Raw Pixels, Zero Cheat Access)
 
-In standard MAP01, monster placements are fixed according to original level geometry.
+The **Vision-Bridged SNN** completely removes privileged cheat engine labels (`labels = ()`). A 12-channel RGB convolutional perception encoder predicts enemy screen coordinates and distances directly from raw camera pixels, driving a frozen recurrent LIF Spiking Neural Network policy.
+
+### A. Watch the Vision Agent Play Live (Interactive Window)
+Opens a graphical desktop window where you can watch the agent aim, fight, and clear MAP01 live:
+
+```powershell
+# Seed 3 (Verified Full Level Clear: 525 steps, 7 kills, 100% route progress)
+python src/evaluate_vision_spiking_policy.py `
+  --seed 3 `
+  --render `
+  --render-delay 0.02
+
+# Seed 9 (Verified Full Level Clear: 497 steps, 9 kills, 100% route progress)
+python src/evaluate_vision_spiking_policy.py `
+  --seed 9 `
+  --render `
+  --render-delay 0.02
+```
+
+### B. Record Video with Live HUD & Bounding Boxes
+Runs the agent and saves a full MP4 recording with real-time telemetry (HP, ammo, action state, kills) and enemy bounding box tracking:
+
+```powershell
+# Record Seed 3 full clear
+python src/evaluate_vision_spiking_policy.py `
+  --seed 3 `
+  --record-video artifacts/vision_level_clear_seed3.mp4
+
+# Record Seed 9 full clear
+python src/evaluate_vision_spiking_policy.py `
+  --seed 9 `
+  --record-video artifacts/vision_level_clear_seed9.mp4
+```
+
+### C. Understanding the Live Bounding Boxes & HUD Overlays
+
+The bounding boxes in the recorded MP4 video are **generated directly by the neural network**, not by engine debug cheats:
+
+```
+┌────────────────────────────────────────────────────────────────────────┐
+│ STEP: 090 | ROUTE: 25.0% | HP: 94 | AMMO: 41 | KILLS: 1               │
+│ ACTION: FORWARD+NONE+ATTACK                                            │
+├────────────────────────────────────────────────────────────────────────┤
+│                                                                        │
+│                      ┌───────────────┐                                 │
+│                      │ HOSTILE 340u  │                                 │
+│                      │               │                                 │
+│                      │   [ENEMY]     │  <-- RED = Firing / Attacking   │
+│                      │               │      GREEN = Tracking Target    │
+│                      └───────────────┘                                 │
+│                                                                        │
+└────────────────────────────────────────────────────────────────────────┘
+```
+
+1. **How the Boxes Are Created**:
+   - The Vision ConvNet (`VisionPerceptionEncoder`) takes the raw 12-channel camera stack and regresses `enemy_screen_x` (horizontal center), `enemy_screen_area` (bounding area), and `enemy_distance`.
+   - The HUD reconstructs the 2D box width from $\sqrt{\text{area}}$ and scales height to Doom's humanoid sprite ratio ($1.5 \times \text{width}$).
+2. **Color Coding**:
+   - **GREEN Bounding Box**: Hostile detected and tracked in crosshairs.
+   - **RED Bounding Box**: Hostile aligned within the firing cone ($\le 15^\circ$) and the SNN policy is actively executing an `ATTACK` command.
+3. **Corpse Rejection**:
+   - The system tracks kill locations and suppresses detections near confirmed corpses, preventing false-positive boxes around dead monsters on the floor.
+
+---
+
+## 2. Privileged Engine-State Baseline Runs (Cheats Enabled)
+
+These runs use ground-truth engine coordinates and object labels (`src/evaluate_engine_state_policy.py`) to demonstrate the upper-bound baseline performance.
 
 ### A. High-Completion Run (Seed 0 - Flawless 616 Steps)
 ```powershell
@@ -43,7 +110,7 @@ python src/evaluate_engine_state_policy.py `
 ```
 
 ### C. Test Other Verified Winning Seeds
-You can test any of the 7 verified passing seeds by changing `--seed <number>`:
+You can test any of the verified passing seeds by changing `--seed <number>`:
 - `--seed 0`
 - `--seed 1`
 - `--seed 3`
@@ -54,7 +121,7 @@ You can test any of the 7 verified passing seeds by changing `--seed <number>`:
 
 ---
 
-## 2. Randomized Jittered Enemy WADs (Spatial Generalization)
+## 3. Randomized Jittered Enemy WADs (Spatial Generalization)
 
 These scenarios use custom-compiled WAD files where monster $(X, Y)$ spawn points and angles are physically perturbed across the map.
 
@@ -104,7 +171,7 @@ python src/evaluate_engine_state_policy.py `
 
 ---
 
-## 3. Altered-Start Perturbation Recovery Tests
+## 4. Altered-Start Perturbation Recovery Tests
 
 Tests whether the agent can recover when forced off-track or rotated away from the route at the very first step.
 
@@ -143,7 +210,7 @@ python src/evaluate_engine_state_policy.py `
 
 ---
 
-## 4. Comparing SNN vs. MLP Baseline Visually
+## 5. Comparing SNN vs. MLP Baseline Visually
 
 ### Watch Spiking Neural Network (SNN) Policy:
 ```powershell
@@ -165,22 +232,32 @@ python src/evaluate_engine_state_policy.py `
 
 ---
 
-## 5. Control Options & Cheatsheet
+## 6. Control Options & Cheatsheet
 
+### Vision Evaluation Parameters (`evaluate_vision_spiking_policy.py`)
+| Parameter | Default Value | Description |
+| :--- | :--- | :--- |
+| `--render` | *(Flag)* | Opens interactive graphical window. |
+| `--render-delay` | `0.02` | Delays each step by 20ms for smooth real-time viewing (~35 FPS). |
+| `--record-video` | `None` | Path to export an MP4 video with real-time HUD and bounding boxes. |
+| `--seed` | `3` | ViZDoom PRNG seed (`3` and `9` are verified 100% clears). |
+| `--enemy-threshold`| `0.50` | Detection confidence threshold to engage enemies in combat. |
+| `--vision-checkpoint` | `best_vision_encoder_rgb.pth` | Path to 12-channel RGB ConvNet perception weights. |
+| `--snn-checkpoint` | `best-engine-state-spiking-snn-v3-robust.pth` | Path to frozen recurrent LIF SNN policy weights. |
+
+### Engine-State Evaluation Parameters (`evaluate_engine_state_policy.py`)
 | Parameter | Recommended Value | Description |
 | :--- | :--- | :--- |
 | `--render` | *(Flag)* | Opens the ViZDoom graphical window to watch live. |
-| `--render-delay` | `0.02` | Delays each step by 20ms for smooth real-time viewing (~35 FPS). Use `0.01` for 2x speed, or omit for uncapped speed. |
-| `--seed` | `0` (or `1, 3, 4, 42, 100, 444`) | Engine random seed (affects damage rolls, monster reaction tics, and spread). |
+| `--render-delay` | `0.02` | Delay between decision steps. |
+| `--seed` | `0` (or `1, 3, 4, 42, 100, 444`) | Engine random seed. |
 | `--config-file` | `scenarios/generated/level01_jitter_s10.cfg` | Custom scenario configuration file (e.g. for jittered WADs). |
 | `--start-perturbation` | `none`, `left`, `right`, `backward` | Injects an initial displacement before neural policy assumes control. |
 | `--start-perturbation-steps` | `6` to `8` | Number of forced perturbation steps to apply at start. |
-| `--episode-timeout` | `6000` | Game tics before timing out (6000 tics = 1500 decision steps). |
-| `--control-shield` | *(Flag, default off)* | Diagnostic only: enables scripted fallback if confidence drops below threshold. |
 
 ---
 
-## 6. Full Automated Benchmark Suite (Headless)
+## 7. Full Automated Benchmark Suite (Headless)
 
 To evaluate the policy across **all 10 seeds**, **all 3 jittered WADs**, and **all 3 perturbation modes** automatically in batch mode:
 
