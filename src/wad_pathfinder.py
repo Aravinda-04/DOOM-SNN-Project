@@ -31,6 +31,7 @@ def line_of_sight(
     p2: tuple[float, float] | Sequence[float],
     grid: NavGrid,
     step_size: float = 8.0,
+    padding_cells: int = 0,
 ) -> bool:
     """Raycast check between two points. Returns True if segment is completely unblocked."""
     dx = float(p2[0] - p1[0])
@@ -47,6 +48,12 @@ def line_of_sight(
         c, r = grid.world_to_grid(x, y)
         if not grid.in_bounds(c, r) or grid.blocked[r, c]:
             return False
+        if padding_cells > 0:
+            for dr in range(-padding_cells, padding_cells + 1):
+                for dc in range(-padding_cells, padding_cells + 1):
+                    nc, nr = c + dc, r + dr
+                    if not grid.in_bounds(nc, nr) or grid.blocked[nr, nc]:
+                        return False
 
     return True
 
@@ -125,10 +132,11 @@ def find_path(
 def simplify_path(
     raw_points: Sequence[tuple[float, float]],
     grid: NavGrid,
-    max_edge_length: float = 160.0,
+    max_edge_length: float = 140.0,
     line_of_sight_step: float = 8.0,
+    padding_cells: int = 1,
 ) -> list[tuple[float, float]]:
-    """Greedy string-pulling simplification with line-of-sight collision checking."""
+    """Greedy string-pulling simplification with clearance-padded collision checking."""
     if len(raw_points) <= 2:
         return list(raw_points)
 
@@ -145,7 +153,7 @@ def simplify_path(
             dist = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
             if dist > max_edge_length:
                 break
-            if line_of_sight(p1, p2, grid, step_size=line_of_sight_step):
+            if line_of_sight(p1, p2, grid, step_size=line_of_sight_step, padding_cells=padding_cells):
                 best_next = next_idx
             else:
                 break

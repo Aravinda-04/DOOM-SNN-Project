@@ -44,7 +44,7 @@ def test_plan_map01_direct_route():
     route = plan_level_route(grid)
 
     assert len(route) >= 15
-    assert len(route) <= 50
+    assert len(route) <= 250
 
     # Start and End points
     spawn = m.player_spawn

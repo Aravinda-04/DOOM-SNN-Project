@@ -212,15 +212,16 @@ class NavGrid:
                 s1 = self.doom_map.sectors[self.doom_map.sidedefs[l.front_sidedef].sector]
                 s2 = self.doom_map.sectors[self.doom_map.sidedefs[l.back_sidedef].sector]
 
-                # If one side is a narrow floor slot, player walks right over it
-                if s1.index in narrow_sectors or s2.index in narrow_sectors:
+                opening = min(s1.ceiling_height, s2.ceiling_height) - max(s1.floor_height, s2.floor_height)
+                if opening < self.config.min_opening_height:
+                    blocking_segments.append(self.doom_map.linedef_segment(l))
                     continue
 
                 step = abs(s1.floor_height - s2.floor_height)
-                opening = min(s1.ceiling_height, s2.ceiling_height) - max(s1.floor_height, s2.floor_height)
-
-                if step > self.config.max_step_height or opening < self.config.min_opening_height:
-                    blocking_segments.append(self.doom_map.linedef_segment(l))
+                if step > self.config.max_step_height:
+                    # Narrow depressions/grates with ample vertical clearance are walkable
+                    if not (s1.index in narrow_sectors or s2.index in narrow_sectors):
+                        blocking_segments.append(self.doom_map.linedef_segment(l))
 
         # Dilation radius
         radius = self.config.player_radius

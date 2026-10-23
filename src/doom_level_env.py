@@ -111,6 +111,7 @@ class DoomLevelEnvironment:
         episode_timeout: Optional[int] = None,
         spectator: bool = False,
         screen_format: str = "GRAY8",
+        map_name: Optional[str] = None,
     ):
         if frame_skip <= 0:
             raise ValueError("frame_skip must be positive.")
@@ -145,7 +146,8 @@ class DoomLevelEnvironment:
             if seed is not None:
                 self.game.set_seed(seed)
 
-            self.game.set_doom_map(MAP_NAME)
+            target_map = str(map_name).lower() if map_name is not None else MAP_NAME
+            self.game.set_doom_map(target_map)
             if spectator:
                 self.game.set_mode(vzd.Mode.SPECTATOR)
             
