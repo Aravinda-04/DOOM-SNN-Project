@@ -3,7 +3,7 @@
 > This document preserves the earlier combat, corridor, and quantization
 > workflow. Several referenced entry points are not present in the active
 > full-level working tree. Use the repository-root README and
-> `FULL_LEVEL_PROJECT_PLAN.md` for current commands.
+> `docs/plans/FULL_LEVEL_PROJECT_PLAN.md` for current commands.
 
 This project trains neural networks to play a full level of DOOM (using FreeDoom2 Map01). It
 compares a conventional feed-forward CNN (FFNN), a spiking CNN (SNN), and a
