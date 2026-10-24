@@ -97,3 +97,21 @@ def test_plan_route_with_health_detour():
     assert med is not None
     min_dist_to_med = min(math.hypot(wp[0] - med.x, wp[1] - med.y) for wp in detour_route)
     assert min_dist_to_med < 64.0
+
+
+def test_plan_tactical_route():
+    """Verify along-the-way tactical routing chains through nearby equipment."""
+    m = load_map_from_wad(FREEDOOM2_WAD, "MAP01")
+    grid = build_navmesh(m)
+
+    tactical_route = plan_level_route(grid, tactical=True)
+    direct_route = plan_level_route(grid, tactical=False)
+
+    assert len(tactical_route) > len(direct_route)
+    assert math.hypot(tactical_route[0][0] - m.player_spawn.x, tactical_route[0][1] - m.player_spawn.y) < 1.0
+    assert math.hypot(tactical_route[-1][0] - grid.exit_midpoints[0][0], tactical_route[-1][1] - grid.exit_midpoints[0][1]) < 64.0
+
+    # Every segment has valid LOS
+    for i in range(len(tactical_route) - 1):
+        assert line_of_sight(tactical_route[i], tactical_route[i + 1], grid)
+

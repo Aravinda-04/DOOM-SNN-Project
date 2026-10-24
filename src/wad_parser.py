@@ -52,6 +52,29 @@ DOOR_SPECIALS = {
     113: "WR_FAST_DOOR_OPEN_WAIT_CLOSE",
 }
 
+MANUAL_DOOR_SPECIALS: set[int] = {
+    1, 26, 27, 28, 31, 32, 33, 34, 117, 118,
+    29, 63, 99, 103, 111, 112, 114, 115, 133, 134, 135, 136, 137,
+}
+
+KEY_DOOR_SPECIALS: dict[int, str] = {
+    # Blue Key Doors / Switches
+    26: "blue",
+    32: "blue",
+    99: "blue",
+    133: "blue",
+    # Red Key Doors / Switches
+    28: "red",
+    33: "red",
+    134: "red",
+    135: "red",
+    # Yellow Key Doors / Switches
+    27: "yellow",
+    34: "yellow",
+    136: "yellow",
+    137: "yellow",
+}
+
 EXIT_SPECIALS = {
     11: "S1_EXIT_LEVEL_NORMAL",
     51: "S1_EXIT_LEVEL_SECRET",
@@ -161,6 +184,11 @@ class Linedef:
         return self.special in DOOR_SPECIALS
 
     @property
+    def required_key(self) -> str | None:
+        """Required keycard/skull color ('blue', 'red', 'yellow') to open/activate, else None."""
+        return KEY_DOOR_SPECIALS.get(self.special)
+
+    @property
     def is_exit(self) -> bool:
         return self.special in EXIT_SPECIALS
 
@@ -241,6 +269,17 @@ class Thing:
         return self.type in KEY_TYPES
 
     @property
+    def key_color(self) -> str | None:
+        """Key color ('blue', 'red', 'yellow') if this entity is a key pickup, else None."""
+        if self.type in (5, 40):
+            return "blue"
+        if self.type in (13, 38):
+            return "red"
+        if self.type in (6, 39):
+            return "yellow"
+        return None
+
+    @property
     def heal_amount(self) -> int:
         if self.type in HEALTH_ITEM_TYPES:
             return HEALTH_ITEM_TYPES[self.type][1]
@@ -310,6 +349,11 @@ class DoomMap:
     def health_items(self) -> list[Thing]:
         """All health pickups (Medikits, Stimpacks, Soulspheres)."""
         return self._health_items
+
+    @property
+    def key_items(self) -> list[Thing]:
+        """All keycard and skull pickups in the level."""
+        return [t for t in self.things if t.is_key and (t.flags & 16) == 0]
 
     @property
     def bounding_box(self) -> tuple[float, float, float, float]:

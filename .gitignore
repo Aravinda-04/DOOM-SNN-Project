@@ -24,3 +24,4 @@ PROJECT_DESCRIPTION.md
 .obsidian/
 /Recordings
 /artifacts/
+deploy.ps1

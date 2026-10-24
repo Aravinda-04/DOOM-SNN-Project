@@ -87,6 +87,8 @@ class EngineStateObservation:
 
 def _is_hostile_label(label: object) -> bool:
     name = str(getattr(label, "object_name", "")).lower()
+    if "ball" in name:
+        return False
     return not name.startswith("dead") and any(
         token in name for token in HOSTILE_NAME_TOKENS
     )

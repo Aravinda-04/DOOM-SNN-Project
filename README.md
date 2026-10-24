@@ -252,14 +252,13 @@ pytest -q
 │   ├── level01.cfg                         # Standard MAP01 scenario
 │   └── generated/                          # Procedurally compiled jitter scenarios
 ├── docs/                                   # Documentation & technical reports
+│   ├── plans/                              # Architecture specs & implementation roadmaps
+│   ├── guides/                             # Manuals & scenario references
 │   ├── fps_and_latency_analysis.md         # Mathematical derivation of FPS & latencies
 │   ├── code_walkthrough.md                 # Architecture walkthrough
 │   └── implementation_memo.md              # Engineering memos
 ├── tests/                                  # Pytest deterministic test suite (156 tests)
-├── setup_assets.py                         # Asset downloader & WAD compiler
-├── VISUAL_TESTING_GUIDE.md                 # Comprehensive visual testing manual
-├── HEALTH_SEEKING_IMPLEMENTATION_PLAN.md  # Tactical survival design memo
-└── VISION_PERCEPTION_BRIDGE_IMPLEMENTATION_PLAN.md # Vision bridge architecture spec
+└── setup_assets.py                         # Asset downloader & WAD compiler
 ```
 
 ---
@@ -269,7 +268,7 @@ pytest -q
 * **Phase 1: Tactical Health Seeking & Doorway Clearance**  
   *Status*: **Completed** (Achieved **80.0% completion rate** with privileged baseline).
 * **Phase 2: Vision Perception Bridge**  
-  *Status*: **Completed** ([Implementation Plan](VISION_PERCEPTION_BRIDGE_IMPLEMENTATION_PLAN.md) | [FPS Analysis](docs/fps_and_latency_analysis.md))  
+  *Status*: **Completed** ([Implementation Plan](docs/plans/VISION_PERCEPTION_BRIDGE_IMPLEMENTATION_PLAN.md) | [FPS Analysis](docs/fps_and_latency_analysis.md))  
   *Milestone*: Replaced privileged enemy coordinate cheats with a 12-channel RGB convolutional perception encoder; achieved full closed-loop MAP01 level completion on Seed 3 (525 steps) and Seed 9 (497 steps) with zero cheat labels.
 * **Phase 3: Visual Health & Item Seeking**  
   *Status*: Planned  

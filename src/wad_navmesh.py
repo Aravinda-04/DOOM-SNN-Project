@@ -22,7 +22,7 @@ class NavMeshConfig:
     """Configuration parameters for 2D walkability grid rasterization."""
     cell_size: float = 16.0               # Spatial resolution in Doom map units (16 aligns with Doom grid)
     player_radius: float = 16.0           # Standard Doom player bounding box radius (32x32 box)
-    max_step_height: float = 24.0         # Max step height player can ascend without lift (vanilla Doom = 24)
+    max_step_height: float = 24.0         # Max step height player can ascend without lift (Doom MAXMOVE = 24)
     min_opening_height: float = 56.0      # Minimum vertical clearance player requires (Doom player height = 56)
     margin: float = 32.0                  # Spatial padding around level bounding box in map units
     narrow_sector_threshold: float = 24.0 # Width threshold for floor grates/light slots spanned by player radius
@@ -49,6 +49,7 @@ class NavGrid:
 
         # Core spatial arrays (height, width)
         self.blocked = np.zeros((self.height_cells, self.width_cells), dtype=bool)
+        self.solid_wall_mask = np.zeros((self.height_cells, self.width_cells), dtype=bool)
         self.reachable = np.zeros((self.height_cells, self.width_cells), dtype=bool)
         self.cost_multipliers = np.ones((self.height_cells, self.width_cells), dtype=np.float32)
 
@@ -59,6 +60,8 @@ class NavGrid:
 
         # Build grid geometry
         self._rasterize_impassable_walls()
+        self._rasterize_hazardous_obstacles()
+        self._carve_traversable_portals()
         self._index_doorways()
         self._compute_reachability_from_spawn()
 
@@ -198,37 +201,68 @@ class NavGrid:
         """Dilate solid 1-sided and step/cliff 2-sided linedefs onto occupancy grid."""
         narrow_sectors = self._find_narrow_slot_sectors()
 
-        blocking_segments: list[tuple[tuple[float, float], tuple[float, float]]] = []
+        solid_segments: list[tuple[tuple[float, float], tuple[float, float]]] = []
+        cliff_segments: list[tuple[tuple[float, float], tuple[float, float]]] = []
 
         for l in self.doom_map.linedefs:
-            # Interactive doors and level exit lines are traversable portals
-            if l.is_door or l.is_exit:
+            # Only 2-sided doors and level exit lines are traversable portals
+            if (l.is_door or l.is_exit) and not l.is_one_sided:
                 continue
 
             # 1-sided lines and explicitly flagged blocking lines
             if l.is_one_sided or bool(l.flags & 0x0001):
-                blocking_segments.append(self.doom_map.linedef_segment(l))
+                solid_segments.append(self.doom_map.linedef_segment(l))
             elif l.is_two_sided and not l.is_lift:
                 s1 = self.doom_map.sectors[self.doom_map.sidedefs[l.front_sidedef].sector]
                 s2 = self.doom_map.sectors[self.doom_map.sidedefs[l.back_sidedef].sector]
 
                 opening = min(s1.ceiling_height, s2.ceiling_height) - max(s1.floor_height, s2.floor_height)
                 if opening < self.config.min_opening_height:
-                    blocking_segments.append(self.doom_map.linedef_segment(l))
+                    cliff_segments.append(self.doom_map.linedef_segment(l))
                     continue
 
                 step = abs(s1.floor_height - s2.floor_height)
                 if step > self.config.max_step_height:
                     # Narrow depressions/grates with ample vertical clearance are walkable
                     if not (s1.index in narrow_sectors or s2.index in narrow_sectors):
-                        blocking_segments.append(self.doom_map.linedef_segment(l))
+                        cliff_segments.append(self.doom_map.linedef_segment(l))
 
         # Dilation radius
         radius = self.config.player_radius
         c_size = self.config.cell_size
 
-        for (x1, y1), (x2, y2) in blocking_segments:
-            # Bounding box of expanded segment
+        for (x1, y1), (x2, y2) in solid_segments:
+            bx1 = min(x1, x2) - radius
+            bx2 = max(x1, x2) + radius
+            by1 = min(y1, y2) - radius
+            by2 = max(y1, y2) + radius
+
+            c_min = max(0, int((bx1 - self.origin_x) / c_size))
+            c_max = min(self.width_cells - 1, int((bx2 - self.origin_x) / c_size))
+            r_min = max(0, int((by1 - self.origin_y) / c_size))
+            r_max = min(self.height_cells - 1, int((by2 - self.origin_y) / c_size))
+
+            dx = x2 - x1
+            dy = y2 - y1
+            l2 = dx * dx + dy * dy
+
+            for r in range(r_min, r_max + 1):
+                cy = self.origin_y + (r + 0.5) * c_size
+                for c in range(c_min, c_max + 1):
+                    cx = self.origin_x + (c + 0.5) * c_size
+                    if l2 <= 1e-6:
+                        dist = math.hypot(cx - x1, cy - y1)
+                    else:
+                        t = max(0.0, min(1.0, ((cx - x1) * dx + (cy - y1) * dy) / l2))
+                        px = x1 + t * dx
+                        py = y1 + t * dy
+                        dist = math.hypot(cx - px, cy - py)
+
+                    if dist <= radius:
+                        self.blocked[r, c] = True
+                        self.solid_wall_mask[r, c] = True
+
+        for (x1, y1), (x2, y2) in cliff_segments:
             bx1 = min(x1, x2) - radius
             bx2 = max(x1, x2) + radius
             by1 = min(y1, y2) - radius
@@ -259,6 +293,76 @@ class NavGrid:
 
                     if dist <= radius:
                         self.blocked[r, c] = True
+
+    def _rasterize_hazardous_obstacles(self) -> None:
+        """Dilate explosive barrels to prevent pathing through explosion hazards."""
+        c_size = self.config.cell_size
+        dilation_radius = self.config.player_radius + 10.0  # Player radius (16) + Barrel radius (10)
+        cell_radius = int(math.ceil(dilation_radius / c_size))
+
+        for thing in self.doom_map.things:
+            # Type 2035 is an explosive barrel
+            if thing.type == 2035:
+                tc, tr = self.world_to_grid(thing.x, thing.y)
+                for dr in range(-cell_radius, cell_radius + 1):
+                    for dc in range(-cell_radius, cell_radius + 1):
+                        nc, nr = tc + dc, tr + dr
+                        if self.in_bounds(nc, nr):
+                            cx, cy = self.grid_to_world(nc, nr)
+                            if math.hypot(cx - thing.x, cy - thing.y) <= dilation_radius:
+                                self.blocked[nr, nc] = True
+
+    def _carve_traversable_portals(self) -> None:
+        """Carve unblocked corridors through doorways, lifts, and switch barriers to avoid dilation pinching."""
+        switch_tags = {
+            l.tag
+            for l in self.doom_map.linedefs
+            if l.special in (133, 134, 135, 136, 137, 29, 63, 103) and l.tag != 0
+        }
+        teleport_tags = {
+            l.tag
+            for l in self.doom_map.linedefs
+            if l.special in (39, 88, 97, 125, 126) and l.tag != 0
+        }
+        portal_lines: list[Linedef] = []
+        for l in self.doom_map.linedefs:
+            if l.is_door or l.is_lift or l.special in (39, 88, 97, 125, 126, 62):
+                portal_lines.append(l)
+                continue
+            if not l.is_two_sided or bool(l.flags & 0x0001):
+                continue
+            s1_idx = self.doom_map.sidedefs[l.front_sidedef].sector if l.front_sidedef != -1 else None
+            s2_idx = self.doom_map.sidedefs[l.back_sidedef].sector if l.back_sidedef != -1 else None
+            t1 = self.doom_map.sectors[s1_idx].tag if s1_idx is not None else 0
+            t2 = self.doom_map.sectors[s2_idx].tag if s2_idx is not None else 0
+            if t1 in switch_tags or t2 in switch_tags or t1 in teleport_tags or t2 in teleport_tags:
+                portal_lines.append(l)
+
+        radius = self.config.player_radius
+        c_size = self.config.cell_size
+        for l in portal_lines:
+            (x1, y1), (x2, y2) = self.doom_map.linedef_segment(l)
+            bx1 = min(x1, x2) - radius
+            bx2 = max(x1, x2) + radius
+            by1 = min(y1, y2) - radius
+            by2 = max(y1, y2) + radius
+            c_min = max(0, int((bx1 - self.origin_x) / c_size))
+            c_max = min(self.width_cells - 1, int((bx2 - self.origin_x) / c_size))
+            r_min = max(0, int((by1 - self.origin_y) / c_size))
+            r_max = min(self.height_cells - 1, int((by2 - self.origin_y) / c_size))
+            dx = x2 - x1
+            dy = y2 - y1
+            l2 = dx * dx + dy * dy
+            for r in range(r_min, r_max + 1):
+                cy = self.origin_y + (r + 0.5) * c_size
+                for c in range(c_min, c_max + 1):
+                    cx = self.origin_x + (c + 0.5) * c_size
+                    t = max(0.0, min(1.0, ((cx - x1) * dx + (cy - y1) * dy) / l2)) if l2 > 0 else 0
+                    px = x1 + t * dx
+                    py = y1 + t * dy
+                    if (cx - px) ** 2 + (cy - py) ** 2 <= radius ** 2:
+                        if not self.solid_wall_mask[r, c]:
+                            self.blocked[r, c] = False
 
     def _index_doorways(self) -> None:
         """Index door lines and mark cells within door passage zones."""

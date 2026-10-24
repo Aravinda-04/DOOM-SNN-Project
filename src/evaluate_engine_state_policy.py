@@ -160,12 +160,18 @@ def predicted_action(
 
     # 4. Anti-oscillation & unstuck invariant:
     if observation is not None and observation.stuck_steps >= 12:
-        # If wedged against a wall/doorframe for >= 12 steps, back away to clear the obstacle
+        cycle = observation.stuck_steps % 16
+        if cycle < 6:
+            loc = Locomotion.BACKWARD
+            turn = action.turning if action.turning != Turning.NONE else Turning.RIGHT
+        else:
+            loc = Locomotion.FORWARD
+            turn = Turning.LEFT if cycle < 11 else Turning.RIGHT
         action = FactorizedAction(
-            locomotion=Locomotion.BACKWARD,
-            turning=action.turning if action.turning != Turning.NONE else Turning.RIGHT,
-            attack=False,
-            use=False,
+            locomotion=loc,
+            turning=turn,
+            attack=action.attack,
+            use=action.use,
         )
     elif observation is not None and observation.stuck_steps >= 4:
         action = FactorizedAction(

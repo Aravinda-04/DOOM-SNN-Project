@@ -20,7 +20,7 @@ from wad_parser import Thing
 @dataclass(frozen=True)
 class PathfinderConfig:
     """Configuration for path planning and waypoint generation."""
-    max_edge_length: float = 160.0       # Maximum distance between consecutive waypoints (keeps targets in FOV)
+    max_edge_length: float = 140.0       # Maximum distance between consecutive waypoints (keeps targets in FOV)
     line_of_sight_step: float = 8.0      # Spatial sampling step for collision-free raycasting (map units)
     health_search_max_cells: int = 4     # Cell search radius to snap entity positions to walkable grid
     health_detour_threshold: int = 50    # Default health value below which detour planning is triggered
@@ -41,7 +41,7 @@ def line_of_sight(
         return True
 
     steps = int(math.ceil(dist / max(step_size, 1.0)))
-    for s in range(steps + 1):
+    for s in range(1, steps + 1):
         t = s / steps
         x = p1[0] + t * dx
         y = p1[1] + t * dy
@@ -134,7 +134,7 @@ def simplify_path(
     grid: NavGrid,
     max_edge_length: float = 140.0,
     line_of_sight_step: float = 8.0,
-    padding_cells: int = 1,
+    padding_cells: int = 0,
 ) -> list[tuple[float, float]]:
     """Greedy string-pulling simplification with clearance-padded collision checking."""
     if len(raw_points) <= 2:
@@ -198,15 +198,143 @@ def find_nearest_health_item(
     return best_item
 
 
+TACTICAL_WEAPON_TYPES: set[int] = {
+    2001,  # Shotgun
+    82,    # Super Shotgun
+    2002,  # Chaingun
+    2004,  # Plasma rifle
+}
+TACTICAL_ARMOR_TYPES: set[int] = {
+    2018,  # Green Armor
+    2019,  # Blue MegaArmor
+}
+TACTICAL_HEALTH_TYPES: set[int] = {
+    2011,  # Medikit
+    2013,  # Soulsphere / Supercharge
+}
+TACTICAL_AMMO_TYPES: set[int] = {
+    2008,  # Box of Shells
+    2048,  # Box of Bullets
+}
+TACTICAL_ITEM_TYPES: set[int] = (
+    TACTICAL_WEAPON_TYPES
+    | TACTICAL_ARMOR_TYPES
+    | TACTICAL_HEALTH_TYPES
+    | TACTICAL_AMMO_TYPES
+)
+
+
+def plan_tactical_level_route(
+    grid: NavGrid,
+    start_pos: tuple[float, float] | None = None,
+    max_detour_distance: float = 260.0,
+    min_waypoint_separation: float = 24.0,
+    config: PathfinderConfig | None = None,
+) -> list[tuple[float, float]]:
+    """Plan trajectory that collects tactical equipment (weapons, armor, ammo, health) near the path."""
+    cfg = config or PathfinderConfig()
+    start = start_pos or grid.doom_map.player_spawn.position
+
+    if not grid.exit_midpoints:
+        raise ValueError(f"No exit lines found in level {grid.doom_map.name}.")
+
+    exit_pos = grid.exit_midpoints[0]
+
+    # Baseline topological path
+    base_path = find_path(grid, start, exit_pos)
+    base_pts = np.asarray(base_path, dtype=np.float32)
+
+    # Search for reachable high-value tactical items close to baseline trajectory
+    candidates: list[tuple[int, float, int, tuple[float, float]]] = []
+    spawn_pt = grid.doom_map.player_spawn
+    for item in grid.doom_map.things:
+        if item.type not in TACTICAL_ITEM_TYPES:
+            continue
+        # Filter out items that do not spawn in Single Player (flags bit 4 = 16) or skill levels (bits 0-2 = 7)
+        if (item.flags & 16) != 0 or (item.flags & 7) == 0:
+            continue
+        # Avoid backtracking into spawn room for health when already at 100%
+        if item.type in TACTICAL_HEALTH_TYPES and math.hypot(item.x - spawn_pt.x, item.y - spawn_pt.y) < 300.0:
+            continue
+        c, r = grid.world_to_grid(item.x, item.y)
+        if grid.is_walkable(c, r):
+            pos = (float(item.x), float(item.y))
+        else:
+            nc, nr = grid.nearest_walkable(item.x, item.y, max_radius_cells=3)
+            if not grid.is_walkable(nc, nr):
+                continue
+            pos = grid.grid_to_world(nc, nr)
+
+        dists = np.hypot(base_pts[:, 0] - item.x, base_pts[:, 1] - item.y)
+        min_idx = int(np.argmin(dists))
+        min_dist = float(dists[min_idx])
+        max_d = max_detour_distance
+        if min_dist <= max_d:
+            if line_of_sight(base_pts[min_idx], pos, grid):
+                candidates.append((min_idx, min_dist, item.type, pos))
+            elif item.type in TACTICAL_WEAPON_TYPES:
+                try:
+                    p = find_path(grid, base_pts[min_idx], pos)
+                    if len(p) <= int(max_d / grid.config.cell_size) + 4:
+                        candidates.append((min_idx, min_dist, item.type, pos))
+                except Exception:
+                    pass
+
+    if not candidates:
+        return simplify_path(
+            base_path,
+            grid,
+            max_edge_length=cfg.max_edge_length,
+            line_of_sight_step=cfg.line_of_sight_step,
+        )
+
+    # Order candidates along route progression
+    candidates.sort(key=lambda x: x[0])
+
+    seen_weapons: set[int] = set()
+    waypoints_chain: list[tuple[float, float]] = [start]
+    last_pos = start
+    for _, _, item_type, item_pos in candidates:
+        if item_type in TACTICAL_WEAPON_TYPES:
+            if item_type in seen_weapons:
+                continue
+            seen_weapons.add(item_type)
+        if math.hypot(item_pos[0] - last_pos[0], item_pos[1] - last_pos[1]) < min_waypoint_separation:
+            continue
+        waypoints_chain.append(item_pos)
+        last_pos = item_pos
+    waypoints_chain.append(exit_pos)
+
+    # Connect chained waypoints with collision-free paths
+    # Connect and simplify chained waypoints while strictly preserving item anchor points
+    full_path: list[tuple[float, float]] = []
+    for i in range(len(waypoints_chain) - 1):
+        raw_seg = find_path(grid, waypoints_chain[i], waypoints_chain[i + 1])
+        simp_seg = simplify_path(
+            raw_seg,
+            grid,
+            max_edge_length=cfg.max_edge_length,
+            line_of_sight_step=cfg.line_of_sight_step,
+        )
+        if i > 0:
+            full_path.extend(simp_seg[1:])
+        else:
+            full_path.extend(simp_seg)
+
+    return full_path
+
+
 def plan_level_route(
     grid: NavGrid,
     start_pos: tuple[float, float] | None = None,
     health_detour: bool = False,
+    tactical: bool = False,
     visited_items: set[int] | None = None,
     config: PathfinderConfig | None = None,
 ) -> list[tuple[float, float]]:
     """Plan complete sparse route from start position to level exit.
 
+    If tactical is True, gathers along-the-way weapons, armor, and medikits.
     If health_detour is True, detours to the nearest reachable Medikit before
     continuing towards the level exit switch.
     """
@@ -218,20 +346,30 @@ def plan_level_route(
 
     exit_pos = grid.exit_midpoints[0]
 
-    # Health detour routing
+    # Dynamic health detour routing
     if health_detour:
         nearest_med = find_nearest_health_item(grid, start, visited_items)
         if nearest_med is not None:
             med_pos = (nearest_med.x, nearest_med.y)
             path_to_med = find_path(grid, start, med_pos)
             path_to_exit = find_path(grid, med_pos, exit_pos)
-            combined = path_to_med[:-1] + path_to_exit
-            return simplify_path(
-                combined,
+            simp_to_med = simplify_path(
+                path_to_med,
                 grid,
                 max_edge_length=cfg.max_edge_length,
                 line_of_sight_step=cfg.line_of_sight_step,
             )
+            simp_to_exit = simplify_path(
+                path_to_exit,
+                grid,
+                max_edge_length=cfg.max_edge_length,
+                line_of_sight_step=cfg.line_of_sight_step,
+            )
+            return simp_to_med[:-1] + simp_to_exit
+
+    # Tactical along-the-way progression
+    if tactical:
+        return plan_tactical_level_route(grid, start_pos=start, config=cfg)
 
     # Direct start-to-exit path
     raw_path = find_path(grid, start, exit_pos)
